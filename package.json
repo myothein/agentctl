@@ -1,0 +1,61 @@
+{
+  "name": "agentctl",
+  "version": "1.0.0",
+  "description": "Tenant Agent self-service CLI for installation, management, and updates",
+  "main": "dist/index.js",
+  "bin": {
+    "agentctl": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build-exe": "pkg . --targets node18-win-x64 --output dist/agentctl.exe",
+    "dev": "ts-node src/index.ts",
+    "watch": "tsc -w",
+    "lint": "eslint 'src/**/*.ts'",
+    "format": "prettier --write 'src/**/*.ts'",
+    "test": "echo \"No tests yet\""
+  },
+  "pkg": {
+    "scripts": "dist/**/*.js",
+    "assets": [
+      "dist/**/*.json",
+      "dist/**/*.env",
+      "dist/**/*.txt"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "keywords": [
+    "agent",
+    "cli",
+    "tenant-agent",
+    "windows-service",
+    "nssm"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/winston": "^2.4.4",
+    "axios": "^1.13.2",
+    "better-sqlite3": "^12.5.0",
+    "chalk": "4",
+    "commander": "^11.0.0",
+    "dotenv": "^16.3.1",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0",
+    "winston-transport": "^4.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.6.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.48.0",
+    "pkg": "^5.8.1",
+    "prettier": "^3.3.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.0"
+  }
+}
