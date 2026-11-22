@@ -1,0 +1,51 @@
+name: Dependency bootstrap and build diagnostics
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  lockfile-bootstrap:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'hardening/release-security-baseline-20261122' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out only the proposed branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate npm lock without running dependency scripts
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Commit generated lockfile to draft branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- package-lock.json
+          if git diff --cached --quiet; then
+            echo 'No lockfile change'
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build: lock dependency graph for reproducible CI'
+          git push origin "HEAD:refs/heads/${{ github.head_ref }}"
+  build-smoke:
+    needs: lockfile-bootstrap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Clean dependency installation without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Compile
+        run: npm run build
