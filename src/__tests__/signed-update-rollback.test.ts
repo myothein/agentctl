@@ -1,4 +1,9 @@
 import test from 'node:test';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
@@ -140,4 +145,33 @@ test('rollback failure is surfaced as MANUAL RECOVERY; never claim success',asyn
             /manual recovery required/);
         assert.ok(x.events.includes('restore'));
     }
+});
+
+test('Windows/Node CLI verifies approved signed file offline and never changes installed files',()=>{
+    const work=mkdtempSync(path.join(tmpdir(),'agentctl-verify-only-'));
+    try {
+        const binary=path.join(work,'tenant agent signed candidate.exe');
+        const manifestFile=path.join(work,'signed-update.json');
+        const trust=path.join(work,'trusted-update-key.pem');
+        writeFileSync(binary,nextBinary);
+        writeFileSync(manifestFile,JSON.stringify(signed));
+        writeFileSync(trust,publicPem);
+        const good=spawnSync(process.execPath,[
+            path.resolve('dist/index.js'),'update','--verify-only',binary,
+            '--manifest',manifestFile,'--trusted-key',trust
+        ],{encoding:'utf8',timeout:15_000});
+        assert.equal(good.status,0,good.stderr);
+        assert.match(good.stdout,/Signature and checksum VALID/);
+        assert.deepEqual(readFileSync(binary),nextBinary);
+        const bad=spawnSync(process.execPath,[
+            path.resolve('dist/index.js'),'update','--verify-only',binary,
+            '--manifest',manifestFile,'--trusted-key',path.join(work,'not-provisioned.pem')
+        ],{encoding:'utf8',timeout:15_000});
+        assert.notEqual(bad.status,0,'Missing trust root must fail closed');
+        const blocked=spawnSync(process.execPath,[
+            path.resolve('dist/index.js'),'update'
+        ],{encoding:'utf8',timeout:15_000});
+        assert.notEqual(blocked.status,0,'No CLI flag may trigger an unverified update');
+        assert.deepEqual(readFileSync(binary),nextBinary);
+    }finally{rmSync(work,{recursive:true,force:true});}
 });
