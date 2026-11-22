@@ -71,3 +71,45 @@ jobs:
           npm run build
       - name: Run NON-DESTRUCTIVE Windows service preflight unit tests
         run: npm test
+
+
+  real-windows-nssm-scm:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'hardening/release-security-baseline-20261122' }}
+    needs: lockfile-bootstrap
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - name: Checkout only the approved draft PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile signed-update orchestration without lifecycle scripts
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Install pinned NSSM on this disposable hosted Windows runner only
+        shell: pwsh
+        run: |
+          if ("${{ runner.environment }}" -ne 'github-hosted' -or "${{ runner.os }}" -ne 'Windows') {
+            throw 'Refusing to install NSSM outside disposable GitHub-hosted Windows runner'
+          }
+          choco install nssm --version=2.24.101.20180116 --yes --no-progress --limit-output
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NSSM Chocolatey package installation failed' }
+          $nssm=(Get-Command nssm.exe -ErrorAction Stop).Source
+          if (-not (Test-Path $nssm)) { throw 'NSSM binary was not found' }
+          "NSSM_EXE=$nssm" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Real NSSM/SCM start-stop signed upgrade and failed-update rollback
+        shell: pwsh
+        run: |
+          if (-not $env:NSSM_EXE) { throw 'Missing verified NSSM path' }
+          node scripts/qa/windows-nssm-real-ci.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Real Windows service QA failed' }
