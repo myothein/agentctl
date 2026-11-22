@@ -61,8 +61,19 @@ export async function runStagedSignedUpdate(
         return;
     } catch {
         if (!stopped) {
-            // A failed stop may leave the service in an indeterminate state. No replacement made.
-            throw new Error('Update stopped before replacement; inspect Windows Service state');
+            // A stop operation could have stopped the service *then* failed.
+            // No binary was replaced; recover original service state if necessary.
+            try {
+                if (!(await ops.isServiceRunning())) {
+                    await ops.startService();
+                    if (!(await ops.isServiceRunning()) || !(await ops.healthCheck())) {
+                        throw new Error('Original service did not recover');
+                    }
+                }
+            } catch {
+                throw new Error('Service stop failed and original service recovery unverified; manual recovery required');
+            }
+            throw new Error('Update aborted before replacement; original service state verified');
         }
         try {
             if (await ops.isServiceRunning()) await ops.stopService();
@@ -81,6 +92,6 @@ export async function runStagedSignedUpdate(
         } catch {
             throw new Error('Update failed and rollback verification failed; manual recovery required');
         }
-        throw new Error('Update failed; previous signed-off artifact restored and healthy');
+        throw new Error('Update failed; previous artifact restored and healthy');
     }
 }
