@@ -24,7 +24,7 @@ function manifestFor(binary:Buffer=nextBinary,version='2.0.0'):SignedAgentManife
     return {schemaVersion:1,version,sha256:digest,signature};
 }
 const signed=manifestFor();
-type Failure = 'backup'|'backup-corrupt'|'stop'|'replace'|'start'|'health'|'restore'|'rollback-start';
+type Failure = 'backup'|'backup-corrupt'|'stop'|'stop-after-effect'|'replace'|'start'|'health'|'restore'|'rollback-start';
 function simulate(fail?:Failure) {
     const old=Buffer.from('synthetic-installed-version-v1');
     let installed=Buffer.from(old);
@@ -46,6 +46,7 @@ function simulate(fail?:Failure) {
             events.push('stop');
             if(fail==='stop')throw Error('SCM stop denied');
             running=false;
+            if(fail==='stop-after-effect')throw Error('SCM returned transient timeout after stopping service');
         },
         async replaceInstalled(bytes){
             events.push('replace');
@@ -118,15 +119,24 @@ test('unknown stopped service cannot be upgraded or overwritten',async()=>{
 });
 test('failed stop refuses any binary replacement',async()=>{
     const x=simulate('stop');
-    await assert.rejects(()=>runStagedSignedUpdate(nextBinary,signed,publicPem,x.ops),/inspect Windows Service/);
+    await assert.rejects(()=>runStagedSignedUpdate(nextBinary,signed,publicPem,x.ops),/before replacement/);
     assert.ok(!x.events.includes('replace'));
     assert.deepEqual(x.getInstalled(),x.old);
 });
+test('stop timeout after service has stopped recovers original service without touching binary',async()=>{
+    const x=simulate('stop-after-effect');
+    await assert.rejects(()=>runStagedSignedUpdate(nextBinary,signed,publicPem,x.ops),/before replacement/);
+    assert.ok(!x.events.includes('replace'));
+    assert.ok(!x.events.includes('restore'));
+    assert.equal(x.getRunning(),true);
+    assert.deepEqual(x.getInstalled(),x.old);
+});
+
 test('interrupted binary write, failed startup and unhealthy new version trigger verified rollback',async()=>{
     for(const failure of ['replace','start','health'] as const) {
         const x=simulate(failure);
         await assert.rejects(()=>runStagedSignedUpdate(nextBinary,signed,publicPem,x.ops),
-            /previous signed-off artifact restored and healthy/);
+            /previous artifact restored and healthy/);
         assert.deepEqual(x.getInstalled(),x.old, 'Previous binary restored after '+failure);
         assert.equal(x.getRunning(),true);
         assert.ok(x.events.includes('restore'));
