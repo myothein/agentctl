@@ -49,3 +49,25 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Compile
         run: npm run build
+      - name: Fail-closed service lifecycle tests
+        run: npm test
+
+  windows-service-safety:
+    needs: lockfile-bootstrap
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Clean dependencies and compile on Windows
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Run NON-DESTRUCTIVE Windows service preflight unit tests
+        run: npm test

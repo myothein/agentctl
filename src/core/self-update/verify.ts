@@ -1,35 +1,25 @@
-import crypto from 'crypto';
-import fs from 'fs';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import axios from 'axios';
 import { getReleaseAsset } from '../../services/github/assets';
 
-/**
- * Verify SHA256 checksum of downloaded agentctl binary
- * @param filePath Local path to downloaded agentctl.exe
- * @param version GitHub release version
- */
-export async function verifyBinary(filePath: string, version: string): Promise<void> {
-    // 1️⃣ Fetch checksum URL for this release
-    const checksumUrl = await getReleaseAsset(version, 'checksum'); // returns URL to checksum file
-    if (!checksumUrl) {
-        console.warn('⚠️  No checksum provided for this release, skipping verification.');
-        return;
+export function assertExpectedSha256(bytes:Buffer, expectedValue:unknown):void{
+    if(typeof expectedValue!=='string' || !/^[a-f0-9]{64}$/i.test(expectedValue.trim())){
+        throw new Error('Missing or invalid signed release checksum metadata');
     }
-
-    // 2️⃣ Download checksum content
-    const res = await axios.get(checksumUrl);
-    const expectedChecksum = res.data.trim(); // should be hex string
-
-    // 3️⃣ Compute SHA256 of downloaded file
-    const fileBuffer = fs.readFileSync(filePath);
-    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-
-    // 4️⃣ Compare
-    if (hash !== expectedChecksum) {
-        throw new Error(
-            `Downloaded binary checksum mismatch! Expected: ${expectedChecksum}, got: ${hash}`
-        );
+    const digest=crypto.createHash('sha256').update(bytes).digest();
+    const expected=Buffer.from(expectedValue.trim(),'hex');
+    if(expected.length!==digest.length || !crypto.timingSafeEqual(expected,digest)){
+        throw new Error('Downloaded update checksum mismatch');
     }
+}
 
-    console.log('✔ Checksum verification passed.');
+/** A checksum is necessary but not sufficient; signature verification remains a release gate. */
+export async function verifyBinary(filePath:string,version:string):Promise<void>{
+    const url=await getReleaseAsset(version,'checksum');
+    if(!url) throw new Error('Missing checksum asset: update rejected');
+    if(!url.startsWith('https://')) throw new Error('Checksum source must use HTTPS');
+    const response=await axios.get<string>(url,{timeout:10_000,responseType:'text'});
+    const bytes=fs.readFileSync(filePath);
+    assertExpectedSha256(bytes,response.data);
 }
