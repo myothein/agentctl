@@ -80,8 +80,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-    env:
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - name: Checkout only the approved draft PR branch
         uses: actions/checkout@v4
@@ -109,6 +107,8 @@ jobs:
           "NSSM_EXE=$nssm" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Real NSSM/SCM start-stop signed upgrade and failed-update rollback
         shell: pwsh
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           if (-not $env:NSSM_EXE) { throw 'Missing verified NSSM path' }
           node scripts/qa/windows-nssm-real-ci.cjs
