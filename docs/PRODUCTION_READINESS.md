@@ -17,3 +17,7 @@
 - [ ] Require independent review, security scan, signed artifacts where applicable, restore drill and approved release go/no-go.
 
 Do not integrate with UIMS V1 until the six infrastructure repositories pass their release gates. No production deployment is authorized by this PR.
+
+## CI verification scope
+
+The initial CI jobs check tracked-file hygiene, dependency lockfile presence, clean npm installation and TypeScript compilation. A successful result **does not** prove authentication, database migrations, offline data safety, functional tests, device integration, signing, or production readiness. Keep the PR as draft until independent release criteria pass.
