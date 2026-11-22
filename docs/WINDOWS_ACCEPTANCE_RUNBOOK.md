@@ -16,9 +16,9 @@
 | G1 Repository hygiene and build | CI tests and locked install succeed | GitHub Actions verified |
 | G2 Trust-root provisioning | Signed update passes against approved Ed25519 public key and rejects other keys | CI synthetic key only |
 | G3 Install preflight | Refuses existing service, missing binary/config, unknown SCM state | CI mock NSSM PASS |
-| G4 Real Windows service installation | Unique disposable service, appropriate ACLs, no overwrite of old service, demand start until approval | NOT EXECUTED |
+| G4 Real Windows service installation | Unique disposable service, appropriate ACLs, no overwrite of old service, demand start until approval | **Partial PASS:** source installer + synthetic Windows QA service; real tenant-agent.exe and target ACLs pending |
 | G5 Update delivery | Safe staged write, file lock handling, separate data preservation, verified backup before service stop | Orchestrator simulation only |
-| G6 Rollback | Startup failure, unhealthy update and interrupted replacement restore original hash and healthy service | Orchestrator simulation only |
+| G6 Rollback | Startup failure, unhealthy update and interrupted replacement restore original hash and healthy service | **Partial PASS:** real hosted Windows synthetic service signed-update rollback; target agent/real power-loss pending |
 | G7 Power outage / reboot | Event UUID parity and SQLite consistency after unexpected termination | NOT EXECUTED |
 | G8 Offline network & duplicate replay | No event loss on 401/5xx/timeouts; correct idempotent central persisted events | GitHub three-service E2E partially covers |
 | G9 Backup & restore | Independent restore to new QA location, SHA-256 and SQL counts verified | Partial SQLite CI backup only |
@@ -54,3 +54,15 @@ Never share the contents of `agent.env`, private keys, API keys or database conn
 - Owner approval before merge of draft PR or any live service modification.
 
 **Existing UIMS V1 remains unchanged; production deployment remains prohibited.**
+
+
+## Verified GitHub-hosted real Windows NSSM/SCM test — 2026-11-22
+
+**Evidence:** https://github.com/myothein/agentctl/actions/runs/45038375014
+
+- **Result:** All jobs PASS, including `real-windows-nssm-scm`. The earlier isolated real-service run also passed: https://github.com/myothein/agentctl/actions/runs/45038142117
+- **Actual source exercised:** `installNewService()` with a real NSSM executable on a disposable GitHub-hosted Windows runner, unique service `GTSPAgentCtlQA_<run-id>`.
+- **Windows SCM operations observed via automated assertions:** service registration, demand start, stop, restart, signed upgrade of a synthetic Node service artifact, health probes, verification of exact previous binary restoration after broken signed update, and rejection of a foreign signing key.
+- **Safety guard:** the test requires a GitHub-hosted Windows runner, approved Draft PR branch, numeric run ID, unique nonexistent service, and the cleanup path removes its own service and directory. No user's workstation, DOA server or live tenant data touched.
+- **Signer:** Ed25519 key generated transiently inside CI, **not** an approved production signer. Sample service is a disposable Node worker, **not** packaged `tenant-agent.exe`. Actual operator CLI preflight (`ensureAdmin` and installed paths), production service account, installer artifact provenance and ProgramData ACLs remain to be validated.
+- **Open blockers:** real packaged tenant-agent.exe startup and shutdown, runtime configuration injection, protected signer/trust root custody and key rotation, interrupted power-loss recovery, sensitive Git history cleanup / credentials rotation, long-duration offline outage/backup restore, real Windows target-machine acceptance and explicit go-live approval. Therefore **PRODUCTION NO-GO**.
