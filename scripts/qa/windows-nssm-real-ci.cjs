@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const child = require('node:child_process');
 const assert = require('node:assert/strict');
 const { runStagedSignedUpdate } = require('../../dist/core/agent/staged-service-update.js');
+const { installNewService } = require('../../dist/core/agent/safe-install.js');
 const { manifestSigningMessage } = require('../../dist/core/agent/signed-update.js');
 
 function required(condition, message) {
@@ -109,10 +110,32 @@ async function main(){
   const nssm=process.env.NSSM_EXE;
   required(nssm && fs.existsSync(nssm),'Pinned NSSM executable is missing');
   required(fs.existsSync(process.execPath),'Node executable missing');
-  command(nssm,['install',name,process.execPath,worker,signal]);
+  const configFile=path.join(root,'synthetic-qa-config.txt');
+  safeSyncWrite(configFile,Buffer.from('disposable synthetic Windows service QA fixture'));
+  // Exercise the actual source-level installer against REAL NSSM, not a mock.
+  // The name was verified absent above; only this unique QA service may be removed.
   installedByThisJob=true;
-  command(nssm,['set',name,'AppDirectory',root]);
-  command(nssm,['set',name,'Start','SERVICE_DEMAND_START']);
+  await installNewService({
+    serviceName:name,
+    agentExe:process.execPath,
+    ctlExe:process.execPath,
+    nssmExe:nssm,
+    binDir:root,
+    configFile,
+    fileExists:fs.existsSync,
+    run:async args=>{
+      const result=child.spawnSync(nssm,args,{
+        encoding:'utf8',windowsHide:true,timeout:30000,
+        stdio:['ignore','pipe','pipe']
+      });
+      return {
+        code:result.error ? 1 : (result.status === null ? 1 : result.status),
+        stdout:result.stdout || '',
+        stderr:result.stderr || (result.error ? result.error.name : '')
+      };
+    }
+  });
+  command(nssm,['set',name,'AppParameters',worker,signal]);
   command(nssm,['set',name,'AppExit','Default','Exit']);
 
   // Genuine Windows Service Controller transitions (not injected mocks).
@@ -195,8 +218,10 @@ async function cleanup(){
       if(state && state!=='STOPPED'){
         command('sc.exe',['stop',name]); await waitState(['STOPPED'],20000);
       }
-      command(process.env.NSSM_EXE,['remove',name,'confirm']);
-      await waitState([null],20000);
+      if(queryState() !== null) {
+        command(process.env.NSSM_EXE,['remove',name,'confirm']);
+        await waitState([null],20000);
+      }
     }catch(error){
       failed=true;
       console.error('QA service cleanup failed. Exact QA name: '+name);
