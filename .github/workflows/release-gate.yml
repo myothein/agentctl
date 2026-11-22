@@ -1,0 +1,36 @@
+name: Release gate - repository hygiene
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  tracked-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked env files, runtime data and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r path; do
+            case "$path" in
+              .env|.env.*|*/.env|*/.env.*)
+                case "$path" in .env.example|*/.env.example|.env.template|*/.env.template) ;; *) echo "::error file=$path::Tracked environment configuration"; failed=1 ;; esac ;;
+            esac
+            case "$path" in
+              node_modules/*|*/node_modules/*|logs/*|*/logs/*|data/*.db|*/data/*.db|mybackup/*|*/mybackup/*|*.sqlite|*.sqlite3|*.db|outbox-events.json)
+                echo "::error file=$path::Tracked runtime artifact"; failed=1 ;;
+            esac
+          done < <(git ls-files)
+          exit "$failed"
+  reproducible-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a committed dependency lockfile
+        shell: bash
+        run: |
+          test -f package-lock.json || test -f pnpm-lock.yaml || test -f yarn.lock

@@ -1,0 +1,23 @@
+# Generated / local files - never commit credentials or tenant data
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.*
+!.env.example
+!.env.template
+logs/
+data/
+mybackup/
+outbox-events.json
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+.DS_Store
