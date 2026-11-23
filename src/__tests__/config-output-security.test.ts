@@ -24,7 +24,7 @@ test('nonsecret operational fields preserve valid values', () => {
 
 test('only strict allowlisted values may appear in public config output', () => {
     const cases: Array<[string, string]> = [
-        ['TENANT_ID', placeholder],
+        ['TENANT_ID', 'invalid/tenant-id/with/slashes'],
         ['TENANT_ID', 'valid\ninjected'],
         ['AGENT_PORT', '0'], ['AGENT_PORT', '70000'],
         ['LOG_LEVEL', 'info\nCENTRAL_API_KEY=leak'],
