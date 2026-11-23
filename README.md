@@ -17,7 +17,7 @@ There are two deliberately separate installation paths:
 
 **Verified disposable Windows SCM test:** the genuine compiled tenant-agent and native SQLite modules ran as a manually started NSSM service. Tests covered start/stop/restart, offline queue persistence, Central recovery delivery and duplicate replay without duplicating the accepted event. All five CI jobs PASS: https://github.com/myothein/agentctl/actions/runs/45097352354 .
 
-**Production remains NO-GO:** the Node-mode installer now explicitly uses the lower-privilege Windows `NT AUTHORITY\\LocalService` account, with hosted Windows SCM verification. The installer now also enables an explicit **per-service SID** and requires per-service SID ACL grants for config and SQLite rather than broad LocalService access; this was verified in disposable Windows SCM QA. **However, the service SID does not change LocalService file ownership**: cross-service owner/DACL attack resistance and fully independent per-university service isolation remain unverified. Signed/reproducible Node and npm distribution, WAL/log/backup ACL governance, secret custody, trusted update channel, off-host restore, real Central/Keycloak and operator-approved installation also remain outstanding. The old Node 18 `pkg` target is not a validated packaging route for Node 22/native SQLite. No production service or data was changed by the hosted QA.
+**Production remains NO-GO:** the Node-mode installer now explicitly uses the lower-privilege Windows `NT AUTHORITY\\LocalService` account, with hosted Windows SCM verification. The installer now also enables an explicit **per-service SID** and requires per-service SID ACL grants for config and SQLite rather than broad LocalService access; this was verified in disposable Windows SCM QA. **The service SID does not change LocalService file ownership**, so the installer now requires inheritable OWNER RIGHTS (`S-1-3-4`) ACL protection; an actual second LocalService Windows service was denied both SQLite read access and owner-based DACL changes on a shared-LocalService-owned test database. This limited two-service negative test PASS does **not** establish fully independent production-level per-university isolation or ongoing permissions monitoring. Signed/reproducible Node and npm distribution, WAL/log/backup ACL governance, secret custody, trusted update channel, off-host restore, real Central/Keycloak and operator-approved installation also remain outstanding. The old Node 18 `pkg` target is not a validated packaging route for Node 22/native SQLite. No production service or data was changed by the hosted QA.
 
 See [Node Service Installation Acceptance](docs/WINDOWS_NODE_SERVICE_INSTALL_ACCEPTANCE.md).
 
@@ -36,7 +36,7 @@ See [Node Service Installation Acceptance](docs/WINDOWS_NODE_SERVICE_INSTALL_ACC
 
 ## Installation
 
-1. Download the latest `agentctl.exe` from the [GitHub Releases](https://github.com/your-org/agentctl/releases) page.
+1. No production-signed `agentctl.exe` distribution is accepted yet. For isolated QA, use only the reviewed source and pinned CI evidence described in the [Windows acceptance report](docs/WINDOWS_NODE_SERVICE_INSTALL_ACCEPTANCE.md); do not treat the historical Node 18 `pkg` output as a vetted release.
 2. Place it in `C:\Program Files\TenantAgent\bin\`.
 3. Add to your PATH if desired.
 
