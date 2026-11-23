@@ -6,9 +6,18 @@
 * Config and outbox management
 * Self-update system that safely updates the running binary
 
-This tool is production-ready and supports **atomic updates with rollback**.
+**Release status: PRODUCTION NO-GO.** GitHub-hosted Windows QA verifies a disposable NSSM service lifecycle, signed-update checks, and simulated rollback. This is **not** an approved production updater, a signed installer, or evidence that the real tenant-agent binary is deployable.
+
+### Integration blocker (2026-11-23)
+
+The existing `agentctl install` expects `C:\\Program Files\\TenantAgent\\bin\\tenant-agent.exe`, `agentctl.exe`, `nssm.exe` and a protected `C:\\ProgramData\\TenantAgent\\config\\agent.env`. However, `myothein/tenant-agent` currently compiles to a Node.js `dist/index.js`, **not** a signed `tenant-agent.exe`. A hosted Windows co-repository compatibility test validates that the missing EXE prevents the installer from contacting Windows SCM.
+
+Six-repository QA evidence: https://github.com/myothein/tenant-agent/actions/runs/45095727438 . The hosted Windows runner executes the real tenant-agent Node process restart/recovery test and pinned agentctl safety tests, but it **does not** install the genuine tenant-agent as a Windows service. Existing agentctl NSSM QA installs a synthetic worker only.
+
+The historical `pkg` target uses Node 18; **do not assume** it can safely bundle or support the Node 22 agent/native SQLite configuration. Choose and security-review a packaging strategy, verify actual signed release artifacts, protected configuration/NTFS ACLs, real Windows service lifecycle and independent rollback before any GO decision. The sample release steps in this README are illustrative only: a checksum file by itself is not a trusted signature.
 
 ---
+
 
 ## Table of Contents
 
@@ -29,7 +38,7 @@ This tool is production-ready and supports **atomic updates with rollback**.
 
 ---
 
-## Folder Structure (Production-Ready)
+## Legacy development folder structure (not a release manifest)
 
 ```
 agentctl/src/
@@ -179,5 +188,5 @@ npm test
 ## Notes
 
 * **Windows only** (self-update uses PowerShell)
-* Fully **rollback-safe**
+* **No production rollback guarantees** until real signed installer/update delivery, genuine tenant-agent packaging and operator recovery drills pass independently.
 * GitHub release assets must include both `.exe` and `.sha256`
