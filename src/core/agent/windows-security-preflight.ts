@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import { readEnvFile } from '../../utils/env-config';
 import { spawnSync } from 'node:child_process';
 
 /**
@@ -272,4 +273,68 @@ export function resolveWindowsServiceSid(serviceName:string):string {
         throw Error('Windows service SID output was invalid or ambiguous');
     }
     return matches[0];
+}
+
+
+/**
+ * The Node tenant-agent requires NODE_ENV=production and an explicitly
+ * pre-provisioned backup directory, outside both its working and install
+ * trees. Validate this before any NSSM/SCM operation. Path checks are pure
+ * and cross-platform using Windows path semantics; ACL checks remain Windows
+ * only. Never include path or secret contents in thrown diagnostics.
+ */
+export function assertNodeBackupLocation(
+    environment: unknown,
+    backupPath: unknown,
+    entryFile: string,
+    workingDir: string
+): string {
+    if (environment !== 'production' ||
+        typeof backupPath !== 'string' || backupPath.length < 4 ||
+        backupPath.length > 240 ||
+        !/^[A-Za-z]:\\/.test(backupPath) ||
+        backupPath !== path.win32.normalize(backupPath) ||
+        /[\x00-\x1f"<>|?*]/.test(backupPath)) {
+        throw Error('Node agent production backup configuration is invalid');
+    }
+    const backup = path.win32.resolve(backupPath);
+    const installRoot = path.win32.dirname(path.win32.dirname(
+        path.win32.dirname(entryFile)));
+    const isWithin = (candidate: string, root: string): boolean => {
+        const relative = path.win32.relative(root, candidate);
+        return relative === '' ||
+            (relative !== '..' && !relative.startsWith('..\\') &&
+             !path.win32.isAbsolute(relative));
+    };
+    if (isWithin(backup, installRoot) || isWithin(backup, workingDir)) {
+        throw Error('Node agent backup cannot reside in runtime or installed application tree');
+    }
+    return backup;
+}
+
+export function verifyNodeBackupProvisioning(options: {
+    configFile: string; entryFile: string; workingDir: string; serviceSid: string;
+}): void {
+    if (process.platform !== 'win32' || !serviceSidPattern.test(options.serviceSid)) {
+        throw Error('Node backup preflight requires verified Windows service identity');
+    }
+    let backup: string;
+    try {
+        const config = readEnvFile(options.configFile);
+        backup = assertNodeBackupLocation(
+            config.NODE_ENV, config.TENANT_AGENT_BACKUP_DIR,
+            options.entryFile, options.workingDir
+        );
+        if (!fs.statSync(backup).isDirectory()) throw Error('Invalid backup directory');
+    } catch {
+        throw Error('Node agent backup directory was not securely provisioned');
+    }
+    // Read-only ACL check includes symlink/reparse traversal. The directory
+    // must grant write to the validated SERVICE SID, not shared LocalService.
+    const evidence = inspectWindowsAclBatch([backup]);
+    try {
+        assertAclSnapshot(evidence[0], 'service-runtime', options.serviceSid);
+    } catch {
+        throw Error('Node agent backup ACL security preflight refused');
+    }
 }
