@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { installNewService, InstallOptions } from '../core/agent/safe-install';
 import { assertAclSnapshot, assertNodeBackupLocation, AclSnapshot } from '../core/agent/windows-security-preflight';
 import { assertExpectedSha256 } from '../core/self-update/verify';
+import { assertInstalledNodeService, transitionVerifiedService } from '../core/agent/secure-service-lifecycle';
 import { applyUpdate } from '../update/apply';
 
 const fileNames={
@@ -373,4 +374,105 @@ test('Node tenant-agent production backup is absolute and outside app and runtim
     assert.throws(() => assertNodeBackupLocation('development', backup, entry, runtime),
         /backup/i,
         'Node Windows service must explicitly opt into production config');
+});
+
+
+test('reviewed Node service registration rejects executable, identity and config drift', () => {
+    const expected = {
+        Application: 'C:\\Program Files\\nodejs\\node.exe',
+        AppParameters: '"--env-file=C:\\ProgramData\\TenantAgent\\config\\agent.env" ' +
+            '"C:\\Program Files\\TenantAgent\\app\\dist\\index.js"',
+        AppDirectory: 'C:\\ProgramData\\TenantAgent\\runtime',
+        ObjectName: 'NT AUTHORITY\\LocalService'
+    };
+    assert.doesNotThrow(() => assertInstalledNodeService(expected));
+    for (const [key, replacement] of [
+        ['Application', 'C:\\Users\\Public\\node.exe'],
+        ['AppParameters', '"--env-file=C:\\Users\\Public\\secrets.env" "C:\\evil.js"'],
+        ['AppDirectory', 'C:\\Users\\Public'],
+        ['ObjectName', 'LocalSystem']
+    ] as Array<[keyof typeof expected, string]>) {
+        assert.throws(() => assertInstalledNodeService({...expected,[key]:replacement}),
+            /does not match reviewed configuration/, key);
+    }
+});
+
+test('verified service start/restart refuses preflight drift before SCM calls', async () => {
+    const calls:string[][]=[];
+    const run=async(args:string[])=>{
+        calls.push(args);
+        return {code:0,stdout:'SERVICE_STOPPED',stderr:''};
+    };
+    await assert.rejects(()=>transitionVerifiedService('start',()=>{
+        throw Error('Synthetic backup directory ACL drift');
+    },run),/ACL drift/);
+    await assert.rejects(()=>transitionVerifiedService('restart',()=>{
+        throw Error('Synthetic identity drift');
+    },run),/identity drift/);
+    assert.deepEqual(calls,[],'Unsafe service must not be queried, stopped or started');
+});
+
+test('verified service start handles exact status and never starts an already running service', async()=>{
+    const calls:string[][]=[];
+    let audited=0;
+    const run=async(args:string[])=>{
+        calls.push(args);
+        return {code:0,stdout: args[0]==='status'?'SERVICE_STOPPED':'',stderr:''};
+    };
+    assert.equal(await transitionVerifiedService('start',()=>{
+        audited++;
+    },run),'started');
+    assert.equal(audited,1);
+    assert.deepEqual(calls,[['status','tenant-agent'],['start','tenant-agent']]);
+
+    calls.length=0;
+    const running=async(args:string[])=>{
+        calls.push(args);
+        return {code:0,stdout:'SERVICE_RUNNING',stderr:''};
+    };
+    assert.equal(await transitionVerifiedService('start',()=>{},running),'already-running');
+    assert.deepEqual(calls,[['status','tenant-agent']]);
+});
+
+test('verified service restart requires clean stop before any new start', async()=>{
+    const calls:string[][]=[];
+    let state='SERVICE_RUNNING';
+    const run=async(args:string[])=>{
+        calls.push(args);
+        if(args[0]==='stop')state='SERVICE_STOPPED';
+        return {code:0,stdout:args[0]==='status'?state:'',stderr:''};
+    };
+    assert.equal(await transitionVerifiedService('restart',()=>{},run),'restarted');
+    assert.deepEqual(calls,[
+        ['status','tenant-agent'],['stop','tenant-agent'],
+        ['status','tenant-agent'],['start','tenant-agent']
+    ]);
+
+    calls.length=0;
+    const failStop=async(args:string[])=>{
+        calls.push(args);
+        return {code:args[0]==='stop'?5:0,
+            stdout:args[0]==='status'?'SERVICE_RUNNING':'',stderr:'private failure'};
+    };
+    await assert.rejects(()=>transitionVerifiedService('restart',()=>{},failStop),/stop failed/);
+    assert.deepEqual(calls,[['status','tenant-agent'],['stop','tenant-agent']]);
+});
+
+test('verified service start rejects unknown SCM state and refuses raw stderr leakage', async()=>{
+    for(const state of ['SERVICE_PAUSED','SERVICE_START_PENDING','SERVICE_UNKNOWN']){
+        const calls:string[][]=[];
+        const run=async(args:string[])=>{
+            calls.push(args);
+            return {code:0,stdout:state,stderr:'SECRET_SHOULD_NOT_BE_EMITTED'};
+        };
+        await assert.rejects(()=>transitionVerifiedService('start',()=>{},run),
+            /Unrecognized Windows service state/);
+        assert.deepEqual(calls,[['status','tenant-agent']]);
+    }
+    const failed=async()=>({
+        code:5,stdout:'',stderr:'private-creds-should-not-leak'
+    });
+    await assert.rejects(()=>transitionVerifiedService('start',()=>{},failed),
+        error => error instanceof Error &&
+        !error.message.includes('private-creds-should-not-leak'));
 });
