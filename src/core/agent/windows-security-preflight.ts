@@ -11,7 +11,7 @@ export type AclSnapshot = { reparse:boolean; entries:AclEntry[] };
 export type AclClass = 'private' | 'code' | 'service-config' | 'service-runtime';
 
 const privileged=new Set(['S-1-5-18','S-1-5-32-544']); // SYSTEM, Administrators
-const localServiceSid='S-1-5-19';
+const serviceSidPattern=/^S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}$/;
 const synchronization=0x00100000;
 const writeAccess=0x00000002 | 0x00000004 | 0x00000010 |
     0x00000040 | 0x00000100 | 0x00010000 |
@@ -55,7 +55,11 @@ $result=@(foreach($p in $targets){
 ConvertTo-Json -InputObject $result -Depth 5 -Compress
 `;
 
-export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
+export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass,serviceSid?:string):void {
+    if((kind==='service-config'||kind==='service-runtime') &&
+       (typeof serviceSid!=='string'||!serviceSidPattern.test(serviceSid))){
+        throw Error('Validated per-service SID required for private service resources');
+    }
     if (!snapshot || typeof snapshot.reparse !== 'boolean' ||
         !Array.isArray(snapshot.entries) || snapshot.reparse ||
         snapshot.entries.length===0) {
@@ -70,7 +74,7 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
             !Number.isInteger(row.rights)) {
             throw Error('Windows ACL preflight cannot interpret an access rule');
         }
-        if(row.sid===localServiceSid && row.type==='Deny' &&
+        if(row.sid===serviceSid && row.type==='Deny' &&
             (kind==='service-config'||kind==='service-runtime')) {
             throw Error('Windows service account is explicitly denied required access');
         }
@@ -80,18 +84,18 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
             systemCanWrite=true;
         }
         if(privileged.has(row.sid))continue;
-        if(row.sid===localServiceSid &&
+        if(row.sid===serviceSid &&
            (kind==='service-config'||kind==='service-runtime')) {
             if(kind==='service-config'){
                 if((rights & writeAccess)!==0) {
-                    throw Error('LocalService must not write tenant agent configuration');
+                    throw Error('Service SID must not write tenant agent configuration');
                 }
                 if((rights & 0x1)!==0)serviceHasRequiredAccess=true;
             }else{
                 // Runtime must read/write its SQLite data but may not take ownership,
                 // change file ACLs or get full-control generic permissions.
                 if((rights & (0x00040000|0x00080000|0x10000000|0x40000000))!==0){
-                    throw Error('LocalService runtime permission escalation refused');
+                    throw Error('Service SID runtime permission escalation refused');
                 }
                 if((rights & 0x3)===0x3)serviceHasRequiredAccess=true;
             }
@@ -109,7 +113,7 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
         throw Error('Windows ACL preflight requires SYSTEM write access');
     }
     if((kind==='service-config'||kind==='service-runtime') && !serviceHasRequiredAccess){
-        throw Error('Windows ACL preflight requires explicit LocalService least-privilege grant');
+        throw Error('Windows ACL preflight requires explicit per-service SID grant');
     }
 }
 
@@ -145,12 +149,16 @@ export type NodeServiceSecurityPaths = {
     nodeExe:string; entryFile:string; configFile:string;
     workingDir:string; nssmExe:string;
     serviceAccount:'NT AUTHORITY\\LocalService';
+    serviceSid:string;
 };
 
 /** Must execute before the first NSSM status query; no path is changed here. */
 export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void {
     if(options.serviceAccount!=='NT AUTHORITY\\LocalService'){
         throw Error('Windows Node service must use the verified LocalService account');
+    }
+    if(!serviceSidPattern.test(options.serviceSid)){
+        throw Error('Windows Node service requires the validated service-specific SID');
     }
     const unique=new Map<string,AclClass>();
     const appDirectory=path.win32.dirname(path.win32.dirname(options.entryFile));
@@ -180,7 +188,7 @@ export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void
     let index=0;
     for(const [p,kind] of unique){
         try {
-            assertAclSnapshot(evidence[index++],kind);
+            assertAclSnapshot(evidence[index++],kind,options.serviceSid);
         }catch(error) {
             const reason=error instanceof Error?error.message:'invalid ACL';
             throw Error('Windows ACL '+roles.get(p)+': '+reason);
@@ -194,7 +202,8 @@ export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void
  * files before the agent creates them; this is a separate read-only release gate.
  * Check existing WAL/SHM sidecars when present, and re-check after restarts.
  */
-export function verifyNodeSqliteArtifacts(workingDir:string):string[] {
+export function verifyNodeSqliteArtifacts(workingDir:string,serviceSid:string):string[] {
+    if(!serviceSidPattern.test(serviceSid))throw Error('SQLite artifact check requires per-service SID');
     if(process.platform!=='win32'){
         throw Error('Windows SQLite ACL QA is available only on Windows');
     }
@@ -215,11 +224,34 @@ export function verifyNodeSqliteArtifacts(workingDir:string):string[] {
     const snapshots=inspectWindowsAclBatch(existing);
     for(let i=0;i<existing.length;i++){
         try {
-            assertAclSnapshot(snapshots[i],'service-runtime');
+            assertAclSnapshot(snapshots[i],'service-runtime',serviceSid);
         }catch{
             // Never expose the live database path or ACL contents in logs.
             throw Error('SQLite runtime ACL preflight denied a generated artifact');
         }
     }
     return existing.map(p=>path.win32.basename(p));
+}
+
+
+/**
+ * Obtain the Windows-computed per-service SID for a fixed, validated service
+ * name before registration. sc.exe showsid does not create a service.
+ */
+export function resolveWindowsServiceSid(serviceName:string):string {
+    if(process.platform!=='win32'||! /^[a-zA-Z0-9_-]{1,64}$/.test(serviceName)){
+        throw Error('Invalid Windows service name for SID resolution');
+    }
+    const r=spawnSync('sc.exe',['showsid',serviceName],{
+        windowsHide:true,encoding:'utf8',timeout:5000,
+        stdio:['ignore','pipe','pipe'],maxBuffer:32*1024
+    });
+    if(r.error||r.status!==0){
+        throw Error('Could not resolve Windows per-service SID');
+    }
+    const matches=(r.stdout||'').match(/S-1-5-80-(?:\d{1,10}-){4}\d{1,10}/g)||[];
+    if(matches.length!==1 || !serviceSidPattern.test(matches[0])){
+        throw Error('Windows service SID output was invalid or ambiguous');
+    }
+    return matches[0];
 }
