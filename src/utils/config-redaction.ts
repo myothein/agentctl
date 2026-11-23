@@ -37,3 +37,24 @@ export function safeConfigurationValue(key: string, value: string): string {
 export function safeConfigurationKey(key: string): string {
     return /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) ? key : '[INVALID_KEY]';
 }
+
+
+/** This legacy CLI uses KEY=VALUE arguments, which OS process listings and
+ * shell history may retain. Reject any likely credential-bearing assignment.
+ * These must be provisioned through an approved protected configuration path.
+ */
+export function parseNonSecretCliAssignment(pair: unknown): { key: string; value: string } {
+    if (typeof pair !== 'string' || pair.length > 2048) {
+        throw new Error('Invalid configuration assignment');
+    }
+    const pos = pair.indexOf('=');
+    if (pos <= 0) throw new Error('Expected KEY=VALUE');
+    const key = pair.slice(0, pos);
+    const value = pair.slice(pos + 1);
+    if (safeConfigurationKey(key) !== key ||
+        /[\r\n\x00-\x1f\x7f]/.test(value) ||
+        /(?:^|_)(?:KEY|TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL|AUTH|DSN|CERT|CERTIFICATE|PRIVATE|DATABASE_URL)(?:_|$)/i.test(key)) {
+        throw new Error('Unsafe configuration assignment: use protected secret provisioning');
+    }
+    return { key, value };
+}
