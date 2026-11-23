@@ -100,13 +100,8 @@ function inspectWindowsAclBatch(targets:string[]):AclSnapshot[] {
         maxBuffer:512*1024
     });
     if(result.error || result.status!==0){
-        // PowerShell may emit CLIXML progress records on stderr: do not treat
-        // those as data or log their raw contents.
-        let raw=result.stderr||'';
-        for(const target of targets){raw=raw.split(target).join('<ACL target>');}
-        const tail=raw.slice(-900).replace(/[^\x20-\x7E]/g,' ').slice(-450);
-        const cause=result.error?.name ?? (result.status===null?'timeout':'provider');
-        throw Error('Unable to verify Windows ACLs ('+cause+'; '+tail+'); no service change permitted');
+        // Fail closed; do not log ACL contents, file paths, accounts or secrets.
+        throw Error('Unable to verify Windows ACLs; no service change permitted');
     }
     try {
         const evidence=JSON.parse(result.stdout) as unknown;
