@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 /**
@@ -155,4 +156,40 @@ export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void
             throw Error('Windows ACL '+roles.get(p)+': '+reason);
         }
     }
+}
+
+
+/**
+ * Post-start verification of generated SQLite data. The installer cannot check
+ * files before the agent creates them; this is a separate read-only release gate.
+ * Check existing WAL/SHM sidecars when present, and re-check after restarts.
+ */
+export function verifyNodeSqliteArtifacts(workingDir:string):string[] {
+    if(process.platform!=='win32'){
+        throw Error('Windows SQLite ACL QA is available only on Windows');
+    }
+    if(typeof workingDir!=='string' ||
+       !/^[A-Za-z]:\\/.test(workingDir) ||
+       workingDir!==path.win32.normalize(workingDir) ||
+       !workingDir.toLowerCase().includes('\\programdata\\tenantagent\\runtime')) {
+        throw Error('Invalid Windows SQLite runtime directory');
+    }
+    const dataDir=path.win32.join(workingDir,'data');
+    const db=path.win32.join(dataDir,'outbox.db');
+    if(!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory() ||
+       !fs.existsSync(db) || !fs.statSync(db).isFile()) {
+        throw Error('Required SQLite database or data directory missing');
+    }
+    const candidates=[dataDir,db,db+'-wal',db+'-shm'];
+    const existing=candidates.filter(p=>fs.existsSync(p));
+    const snapshots=inspectWindowsAclBatch(existing);
+    for(let i=0;i<existing.length;i++){
+        try {
+            assertAclSnapshot(snapshots[i],'private');
+        }catch{
+            // Never expose the live database path or ACL contents in logs.
+            throw Error('SQLite runtime ACL preflight denied a generated artifact');
+        }
+    }
+    return existing.map(p=>path.win32.basename(p));
 }
