@@ -12,6 +12,8 @@ export type AclClass = 'private' | 'code' | 'service-config' | 'service-runtime'
 
 const privileged=new Set(['S-1-5-18','S-1-5-32-544']); // SYSTEM, Administrators
 const serviceSidPattern=/^S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}$/;
+const ownerRightsSid='S-1-3-4'; // Windows OWNER RIGHTS: suppresses owner's implicit WRITE_DAC
+const ownerReadControl=0x00020000;
 const synchronization=0x00100000;
 const writeAccess=0x00000002 | 0x00000004 | 0x00000010 |
     0x00000040 | 0x00000100 | 0x00010000 |
@@ -67,6 +69,7 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass,serviceSid?
     }
     let systemCanWrite=false;
     let serviceHasRequiredAccess=false;
+    let ownerRightsProtected=false;
     for(const row of snapshot.entries) {
         if(!row || typeof row.sid!=='string' ||
             !/^S-\d+(?:-\d+)+$/.test(row.sid) ||
@@ -80,6 +83,18 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass,serviceSid?
         }
         if(row.type!=='Allow')continue;
         const rights=row.rights >>> 0;
+        if(row.sid===ownerRightsSid &&
+           (kind==='service-config'||kind==='service-runtime')) {
+            // Without this explicit OWNER RIGHTS ACE, a LocalService-owned
+            // SQLite file gives *every* process with that same account SID
+            // implicit WRITE_DAC, even if its DACL lacks the foreign SID.
+            if((rights & ownerReadControl)===0 ||
+               (rights & ~(ownerReadControl|synchronization))!==0){
+                throw Error('Windows OWNER RIGHTS must not grant WRITE_DAC or data access');
+            }
+            ownerRightsProtected=true;
+            continue;
+        }
         if(row.sid==='S-1-5-18' && (rights & writeAccess)!==0) {
             systemCanWrite=true;
         }
@@ -114,6 +129,9 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass,serviceSid?
     }
     if((kind==='service-config'||kind==='service-runtime') && !serviceHasRequiredAccess){
         throw Error('Windows ACL preflight requires explicit per-service SID grant');
+    }
+    if((kind==='service-config'||kind==='service-runtime') && !ownerRightsProtected){
+        throw Error('Windows ACL preflight requires OWNER RIGHTS to block implicit owner WRITE_DAC');
     }
 }
 
