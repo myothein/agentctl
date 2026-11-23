@@ -170,6 +170,7 @@ test('node install always refuses a missing or rejected ACL preflight before NSS
 });
 
 const unitServiceSid='S-1-5-80-123-456-789-101-112';
+const ownerRightsRead={sid:'S-1-3-4',type:'Allow',rights:131072} as const;
 const trustedAcl:AclSnapshot={
     reparse:false,
     entries:[
@@ -234,11 +235,11 @@ test('LocalService config read without write and runtime limited Modify must be 
     const sid=unitServiceSid;
     const readonly={
         ...trustedAcl,
-        entries:[...trustedAcl.entries,{sid,type:'Allow',rights:131209}]
+        entries:[...trustedAcl.entries,ownerRightsRead,{sid,type:'Allow',rights:131209}]
     };
     const runtime={
         ...trustedAcl,
-        entries:[...trustedAcl.entries,{sid,type:'Allow',rights:1245631}]
+        entries:[...trustedAcl.entries,ownerRightsRead,{sid,type:'Allow',rights:1245631}]
     };
     assert.doesNotThrow(()=>assertAclSnapshot(readonly,'service-config',unitServiceSid));
     assert.doesNotThrow(()=>assertAclSnapshot(runtime,'service-runtime',unitServiceSid));
@@ -298,7 +299,7 @@ test('service SID is required on config/SQLite and shared LocalService grants ar
     const localService='S-1-5-19';
     const secure={
         ...trustedAcl,
-        entries:[...trustedAcl.entries,
+        entries:[...trustedAcl.entries,ownerRightsRead,
             {sid:unitServiceSid,type:'Allow',rights:131209}]
     };
     assert.doesNotThrow(()=>assertAclSnapshot(secure,'service-config',unitServiceSid));
@@ -310,4 +311,36 @@ test('service SID is required on config/SQLite and shared LocalService grants ar
         /untrusted private/);
     assert.throws(()=>assertAclSnapshot(secure,'service-config'),
         /Validated per-service SID/);
+});
+
+
+test('generated service-owned SQLite files must protect owner implicit WRITE_DAC',()=>{
+    const serviceGrant={sid:unitServiceSid,type:'Allow',rights:1245631} as const;
+    const unprotected:AclSnapshot={...trustedAcl,
+        entries:[...trustedAcl.entries,serviceGrant]};
+    assert.throws(
+        ()=>assertAclSnapshot(unprotected,'service-runtime',unitServiceSid),
+        /OWNER RIGHTS/
+    );
+    const guarded:AclSnapshot={...trustedAcl,
+        entries:[...trustedAcl.entries,ownerRightsRead,serviceGrant]};
+    assert.doesNotThrow(
+        ()=>assertAclSnapshot(guarded,'service-runtime',unitServiceSid)
+    );
+    const escalation:AclSnapshot={...trustedAcl,
+        entries:[...trustedAcl.entries,
+            {sid:'S-1-3-4',type:'Allow',rights:0x00060000},
+            serviceGrant]};
+    assert.throws(
+        ()=>assertAclSnapshot(escalation,'service-runtime',unitServiceSid),
+        /OWNER RIGHTS must not grant/
+    );
+    const ownerDataRead:AclSnapshot={...trustedAcl,
+        entries:[...trustedAcl.entries,
+            {sid:'S-1-3-4',type:'Allow',rights:0x00020001},
+            serviceGrant]};
+    assert.throws(
+        ()=>assertAclSnapshot(ownerDataRead,'service-runtime',unitServiceSid),
+        /OWNER RIGHTS must not grant/
+    );
 });
