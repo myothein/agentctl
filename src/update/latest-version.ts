@@ -1,23 +1,11 @@
-import path from 'path';
-import os from 'os';
-
+/** Version metadata must come from an authenticated, verified release manifest.
+ * A fabricated version and an imaginary temp file are never a valid update.
+ */
 export interface LatestVersion {
     version: string;
-    filePath: string; // path to downloaded binary
+    filePath: string;
 }
 
 export async function getLatestVersion(): Promise<LatestVersion> {
-    /**
-     * In real implementation:
-     * - fetch version info from HTTP API
-     * - download binary to temp folder
-     */
-
-    const tempDir = os.tmpdir();
-    const downloadedBinary = path.join(tempDir, 'tenant-agent.exe');
-
-    return {
-        version: '1.0.1',
-        filePath: downloadedBinary,
-    };
+    throw new Error('Remote update unavailable: signed manifest and approved release source not configured');
 }
