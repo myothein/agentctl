@@ -22,10 +22,14 @@ assert(/^\d{5,16}$/.test(process.env.GITHUB_RUN_ID||''),'Invalid CI run identifi
 assert(/^v22\./.test(process.version),'Node 22 required');
 const id=process.env.GITHUB_RUN_ID;
 const serviceName='GTSPNodeAgentQA_'+id;
+const siblingName='GTSPSiblingQA_'+id;
 const serviceSid=resolveWindowsServiceSid(serviceName);
 const programFiles=process.env.ProgramFiles||'C:\\Program Files';
 const programData=process.env.ProgramData||'C:\\ProgramData';
 const appRoot=path.join(programFiles,'TenantAgent','app');
+const siblingScript=path.join(appRoot,'sibling-worker.cjs');
+const siblingRoot=path.join(programData,'GTSP-SiblingQA_'+id);
+const siblingResult=path.join(siblingRoot,'result.json');
 const binDir=path.join(programFiles,'TenantAgent','bin');
 const trustedNode=path.join(binDir,'node.exe');
 const trustedNssm=path.join(binDir,'nssm.exe');
@@ -54,6 +58,7 @@ let tenantServer,centralServer;
 const nssm=process.env.NSSM_EXE;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 let serviceReserved=false,stagedApp=false,stagedData=false;
+let siblingReserved=false,siblingRootCreated=false;
 let serviceNssm=nssm;
 
 function cmd(exe,args,allowFailure=false){
@@ -112,13 +117,14 @@ Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
     throw Error('Windows CI could not pre-provision a service-specific SID ACL');
   }
 }
-function state(){
-  const r=cmd('sc.exe',['query',serviceName],true);
+function stateOf(name){
+  const r=cmd('sc.exe',['query',name],true);
   if(r.status!==0)return null;
   const m=/STATE\s*:\s*\d+\s+([A-Z_]+)/.exec(r.stdout);
   if(!m)throw Error('Unrecognized Windows SCM state');
   return m[1];
 }
+function state(){return stateOf(serviceName);}
 async function until(predicate,label,timeout=25000){
   const deadline=Date.now()+timeout;
   while(Date.now()<deadline){
@@ -154,6 +160,38 @@ function outboxRow(){
     return db.prepare('SELECT id,tenantId,sent,retry_count FROM outbox WHERE id=?')
       .get(eventId)||null;
   }finally{db.close();}
+}
+async function verifySiblingIsolation(dbPath){
+  assert.equal(stateOf(siblingName),null,'Would replace a sibling service');
+  assert(!fs.existsSync(siblingRoot),'Sibling evidence folder unexpectedly exists');
+  fs.mkdirSync(siblingRoot,{recursive:true});siblingRootCreated=true;
+  cmd('icacls.exe',[siblingRoot,'/inheritance:r']);
+  cmd('icacls.exe',[siblingRoot,'/grant:r',
+    '*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F',
+    '*S-1-5-19:(OI)(CI)M']);
+  siblingReserved=true;
+  cmd(serviceNssm,['install',siblingName,trustedNode]);
+  cmd(serviceNssm,['set',siblingName,'AppDirectory',siblingRoot]);
+  const args=['"'+siblingScript+'"','"--ci-sibling-probe"',
+    '"'+dbPath+'"','"'+siblingResult+'"'].join(' ');
+  cmd(serviceNssm,['set',siblingName,'AppParameters',args]);
+  cmd(serviceNssm,['set',siblingName,'ObjectName','NT AUTHORITY\\LocalService','']);
+  cmd(serviceNssm,['set',siblingName,'Start','SERVICE_DEMAND_START']);
+  cmd(serviceNssm,['set',siblingName,'AppExit','Default','Exit']);
+  cmd('sc.exe',['sidtype',siblingName,'unrestricted']);
+  assert.notEqual(resolveWindowsServiceSid(siblingName),serviceSid,
+    'Sibling and tenant services must have different SIDs');
+  cmd('sc.exe',['start',siblingName]);
+  await until(()=>fs.existsSync(siblingResult),'sibling service negative ACL probe',15000);
+  const result=JSON.parse(fs.readFileSync(siblingResult,'utf8'));
+  // If a sibling unexpectedly rewrote the synthetic DACL, undo it before
+  // returning failure: no broadened test permissions survive on disk.
+  if(result?.daclDenied!==true){
+    cmd('icacls.exe',[dbPath,'/remove','*S-1-5-32-545'],true);
+  }
+  assert.deepEqual(result,{readDenied:true,daclDenied:true},
+    'Another LocalService service bypassed per-service SQLite isolation');
+  console.log('PASS sibling LocalService service SID denied both SQLite data read and DACL modification');
 }
 async function main(){
   assert(nssm&&fs.existsSync(nssm),'Pinned NSSM missing from hosted runner');
@@ -200,6 +238,8 @@ async function main(){
     'Staged pinned NSSM hash does not match its pinned CI package');
   fs.cpSync(path.join(source,'dist'),distPath,{recursive:true});
   fs.copyFileSync(path.join(source,'package.json'),path.join(appRoot,'package.json'));
+  fs.copyFileSync(path.resolve('scripts','qa','windows-localservice-sibling-worker.cjs'),
+    siblingScript);
   fs.cpSync(path.join(source,'node_modules'),path.join(appRoot,'node_modules'),{
     recursive:true,dereference:true
   });
@@ -260,7 +300,7 @@ async function main(){
   // Windows POSIX mode 0600 is NOT an NTFS ACL. Explicitly remove inherited
   // group grants and allow only SYSTEM + local Administrators on CI private data.
   for(const p of [dataRoot,workDir,configDir,configFile,
-    appRoot,distPath,entry,binDir,trustedNode,trustedNssm]){
+    appRoot,distPath,entry,siblingScript,binDir,trustedNode,trustedNssm]){
     cmd('icacls.exe',[p,'/inheritance:r']);
     cmd('icacls.exe',[p,'/grant:r',
       '*S-1-5-18:(OI)(CI)F'.replace(':(OI)(CI)F',
@@ -278,7 +318,7 @@ async function main(){
   for(const p of [appRoot,distPath,binDir]){
     cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)RX']);
   }
-  for(const p of [entry,trustedNode,trustedNssm]){
+  for(const p of [entry,siblingScript,trustedNode,trustedNssm]){
     cmd('icacls.exe',[p,'/grant',localService+':RX']);
   }
   const verifiedSecurity=o=>verifyNodeServiceSecurity({
@@ -350,6 +390,10 @@ async function main(){
   await until(()=>state()==='STOPPED','actual Node.js service STOPPED');
   assert(fs.existsSync(dbPath),'Stopped service unexpectedly deleted SQLite outbox');
   assert.equal(outboxRow()?.sent,0,'Unacknowledged event must survive SCM stop');
+  // Execute a second Windows service under the SAME LocalService account but
+  // with a DIFFERENT service SID. It must not read our SQLite file or gain
+  // WRITE_DAC as its shared file owner. Only synthetic CI data is targeted.
+  await verifySiblingIsolation(dbPath);
   // A database created at runtime must not accidentally become world-readable.
   // Exercise actual icacls/PowerShell ACLs after stop, BEFORE restarting SCM.
   verifyNodeSqliteArtifacts(workDir,serviceSid);
@@ -386,6 +430,20 @@ async function main(){
 }
 async function cleanup(){
   let error;
+  if(siblingReserved){
+    try{
+      if(stateOf(siblingName) && stateOf(siblingName)!=='STOPPED'){
+        cmd('sc.exe',['stop',siblingName],true);
+        await until(()=>stateOf(siblingName)==='STOPPED',
+          'sibling CI SCM stop',15000);
+      }
+      if(stateOf(siblingName)!==null){
+        cmd(serviceNssm,['remove',siblingName,'confirm']);
+        await until(()=>stateOf(siblingName)===null,
+          'sibling CI SCM removal',15000);
+      }
+    }catch(e){error=e;console.error('Sibling SCM cleanup failed');}
+  }
   if(serviceReserved){
     try{
       if(state()&&state()!=='STOPPED'){
@@ -405,7 +463,10 @@ async function cleanup(){
       catch(e){error=error||e;}
     }
   }
-  if(state()!==null){throw error||Error('Service remained registered; retaining QA paths');}
+  if(state()!==null||stateOf(siblingName)!==null){
+    throw error||Error('SCM service registration remained; retain QA paths for review');
+  }
+  if(siblingRootCreated)fs.rmSync(siblingRoot,{recursive:true,force:true});
   if(stagedApp)fs.rmSync(appRoot,{recursive:true,force:true});
   if(stagedData)fs.rmSync(dataRoot,{recursive:true,force:true});
   if(error)throw error;
