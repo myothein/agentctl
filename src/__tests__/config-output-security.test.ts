@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { safeConfigurationKey, safeConfigurationValue, parseNonSecretCliAssignment } from '../utils/config-redaction';
+import { config as legacyConfig } from '../commands/agent/config';
 
 const placeholder = 'synthetic-secret-token-never-emit-0123456789';
 
@@ -71,4 +72,32 @@ test('nonsecret config CLI assignments remain functional and preserve equals sig
         { key: 'LOG_LEVEL', value: 'info' });
     assert.deepEqual(parseNonSecretCliAssignment('NOTES=key=value'),
         { key: 'NOTES', value: 'key=value' });
+});
+
+
+test('legacy nested agent config path rejects secret assignment without echoing arguments', async () => {
+    // The legacy command is not registered in the top-level CLI. Explicitly
+    // exercise its exported interface so it cannot bypass the active policy
+    // if another consumer registers it in the future.
+    const sensitive = 'synthetic-secret-value-do-not-log-93571';
+    const originalError = console.error;
+    const originalLog = console.log;
+    const originalCode = process.exitCode;
+    const emitted: string[] = [];
+    try {
+        console.error = (...parts: unknown[]) => emitted.push(parts.map(String).join(' '));
+        console.log = (...parts: unknown[]) => emitted.push(parts.map(String).join(' '));
+        process.exitCode = 0;
+        await legacyConfig.parseAsync(
+            ['agentctl', 'config', 'set', 'CENTRAL_AGENT_API_KEY=' + sensitive]
+        );
+        assert.equal(process.exitCode, 1, 'Unsafe nested configuration must fail closed');
+        assert.ok(emitted.some(line => line.includes('Unsafe configuration assignment')));
+        assert.equal(emitted.join('\n').includes(sensitive), false);
+        assert.equal(emitted.join('\n').includes('CENTRAL_AGENT_API_KEY='), false);
+    } finally {
+        console.error = originalError;
+        console.log = originalLog;
+        process.exitCode = originalCode;
+    }
 });
