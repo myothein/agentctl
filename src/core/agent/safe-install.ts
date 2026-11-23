@@ -10,7 +10,7 @@ export type InstallOptions = {
     binDir:string;
     configFile:string;
     /** Optional Node 22 service mode: original EXE mode remains unchanged. */
-    nodeAgent?: { entryFile:string; workingDir:string; runtimeVersion:string };
+    nodeAgent?: { entryFile:string; workingDir:string; runtimeVersion:string; serviceAccount:'NT AUTHORITY\\LocalService' };
     /** Mandatory Node-mode read-only ACL verification before any NSSM operation. */
     verifyNodeSecurity?: (options:InstallOptions)=>void | Promise<void>;
     fileExists:(file:string)=>boolean;
@@ -31,7 +31,10 @@ function quoteWindowsArgument(value:string):string {
 }
 function nodeServiceParameters(options:InstallOptions):string|null {
     if(!options.nodeAgent)return null;
-    const {entryFile,workingDir,runtimeVersion}=options.nodeAgent;
+    const {entryFile,workingDir,runtimeVersion,serviceAccount}=options.nodeAgent;
+    if(serviceAccount!=='NT AUTHORITY\\LocalService') {
+        throw new Error('Node service requires an explicit low-privilege LocalService identity');
+    }
     if(!/^v22\.\d+\.\d+$/.test(runtimeVersion) ||
         !/\\node\.exe$/i.test(options.agentExe)) {
         throw new Error('Node service mode requires a verified Node 22 executable');
@@ -92,6 +95,13 @@ export async function installNewService(options:InstallOptions):Promise<void> {
         if(parameters){
             await mustSucceed(options.run,['set',options.serviceName,'AppParameters',parameters],
                 'NSSM AppParameters');
+        }
+        if(options.nodeAgent){
+            // Never accept NSSM's implicit LocalSystem default for the Node agent.
+            // LocalService uses a fixed Windows well-known SID and no password;
+            // any account configuration failure rolls back only this new service.
+            await mustSucceed(options.run,['set',options.serviceName,'ObjectName',
+                options.nodeAgent.serviceAccount,''], 'NSSM least-privilege ObjectName');
         }
         // The service is intentionally demand-start: runtime secrets/ACLs require independent QA.
         await mustSucceed(options.run,['set',options.serviceName,'Start','SERVICE_DEMAND_START'],
