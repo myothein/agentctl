@@ -15,16 +15,26 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          while IFS= read -r path; do
+          # NUL-delimited paths: fail closed for filenames containing whitespace.
+          while IFS= read -r -d '' path; do
             case "$path" in
               .env|.env.*|*/.env|*/.env.*)
-                case "$path" in .env.example|*/.env.example|.env.template|*/.env.template) ;; *) echo "::error file=$path::Tracked environment configuration"; failed=1 ;; esac ;;
+                case "$path" in
+                  .env.example|*/.env.example|.env.template|*/.env.template) ;;
+                  *) printf '::error::Tracked local environment configuration: %q\n' "$path"; failed=1 ;;
+                esac ;;
             esac
+            # Keep authentication material out of even temporary draft branches.
             case "$path" in
-              node_modules/*|*/node_modules/*|logs/*|*/logs/*|data/*.db|*/data/*.db|mybackup/*|*/mybackup/*|*.sqlite|*.sqlite3|*.db|outbox-events.json)
-                echo "::error file=$path::Tracked runtime artifact"; failed=1 ;;
+              .npmrc|*/.npmrc|*.pem|*.p12|*.pfx|*.key|id_rsa|*/id_rsa|id_ed25519|*/id_ed25519)
+                printf '::error::Tracked authentication material: %q\n' "$path"; failed=1 ;;
             esac
-          done < <(git ls-files)
+            # Ignore source code under src/backup; reject runtime archives and data.
+            case "$path" in
+              node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|coverage/*|*/coverage/*|logs/*|*/logs/*|mybackup/*|*/mybackup/*|backups/*|*/backups/*|data/*.db|*/data/*.db|*.db|*.db-*|*.sqlite|*.sqlite3|*.sqlite-*|*.sqlite3-*|*.dump|*.backup|*.log|outbox-events.json|*/outbox-events.json)
+                printf '::error::Tracked runtime artifact: %q\n' "$path"; failed=1 ;;
+            esac
+          done < <(git ls-files -z)
           exit "$failed"
   reproducible-dependencies:
     runs-on: ubuntu-latest
