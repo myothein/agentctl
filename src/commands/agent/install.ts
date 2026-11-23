@@ -6,7 +6,7 @@ import { runCommand } from '../../utils/exec';
 import { fileExists } from '../../utils/fs';
 import { SERVICE_NAME } from '../../constants/service';
 import { installNewService } from '../../core/agent/safe-install';
-import { verifyNodeServiceSecurity, resolveWindowsServiceSid } from '../../core/agent/windows-security-preflight';
+import { verifyNodeServiceSecurity, verifyNodeBackupProvisioning, resolveWindowsServiceSid } from '../../core/agent/windows-security-preflight';
 
 const programFiles=path.win32.join('C:\\','Program Files','TenantAgent');
 const programData=path.win32.join('C:\\','ProgramData','TenantAgent');
@@ -54,6 +54,12 @@ export const install=new Command('install')
                         nodeExe:agentExe,entryFile:nodeAgent.entryFile,
                         configFile,workingDir:nodeAgent.workingDir,nssmExe,
                         serviceAccount:nodeAgent.serviceAccount,serviceSid:nodeAgent.serviceSid
+                    });
+                    // The tenant-agent must never start in development mode
+                    // or fall back to an application-tree SQLite backup path.
+                    verifyNodeBackupProvisioning({
+                        configFile,entryFile:nodeAgent.entryFile,
+                        workingDir:nodeAgent.workingDir,serviceSid:nodeAgent.serviceSid
                     });
                 }}:{}),
                 ...(options.nodeRuntime?{configureServiceSid:async(name:string)=>{
