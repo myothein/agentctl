@@ -93,9 +93,12 @@ function inspectWindowsAcl(target:string):AclSnapshot {
         // Read-only ACL checks never fetch file contents or secret values.
         // Short sanitized PowerShell failure category helps distinguish an
         // unavailable ACL provider from an unreadable security principal.
-        const details=(result.stderr||'').match(
-            /(?:IdentityNotMappedException|UnauthorizedAccessException|ItemNotFoundException|ArgumentException|Get-Item|Get-Acl|Translate|FullyQualifiedErrorId[^\r\n]{0,90})/g
-        )?.slice(0,2).join(';') ?? 'unknown';
+        const diagnostic=(result.stderr||'')
+            .replaceAll(target,'<ACL target>')
+            .replace(/[^\x20-\x7E\r\n]/g,'')
+            .split(/\r?\n/).filter(Boolean).slice(0,2).join('; ')
+            .slice(0,240);
+        const details=diagnostic || (result.error?.name ?? 'unknown');
         throw Error('Unable to verify Windows ACLs ('+details+'); no service change permitted');
     }
     try {
