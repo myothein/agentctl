@@ -10,7 +10,7 @@ const child=require('node:child_process');
 const crypto=require('node:crypto');
 const http=require('node:http');
 const {installNewService}=require('../../dist/core/agent/safe-install.js');
-const {verifyNodeServiceSecurity,verifyNodeSqliteArtifacts}=require('../../dist/core/agent/windows-security-preflight.js');
+const {verifyNodeServiceSecurity,verifyNodeSqliteArtifacts,resolveWindowsServiceSid}=require('../../dist/core/agent/windows-security-preflight.js');
 
 assert(process.platform==='win32' && process.env.CI==='true' &&
   process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_OS==='Windows' &&
@@ -22,6 +22,7 @@ assert(/^\d{5,16}$/.test(process.env.GITHUB_RUN_ID||''),'Invalid CI run identifi
 assert(/^v22\./.test(process.version),'Node 22 required');
 const id=process.env.GITHUB_RUN_ID;
 const serviceName='GTSPNodeAgentQA_'+id;
+const serviceSid=resolveWindowsServiceSid(serviceName);
 const programFiles=process.env.ProgramFiles||'C:\\Program Files';
 const programData=process.env.ProgramData||'C:\\ProgramData';
 const appRoot=path.join(programFiles,'TenantAgent','app');
@@ -224,12 +225,13 @@ async function main(){
   // Grant the actual low-privilege service identity only the permissions it
   // needs. No LocalService write permission is granted on executable code.
   const localService='*S-1-5-19';
+  // Service-specific SID is the only nonprivileged private data principal.
   for(const p of [configDir,configFile]){
     cmd('icacls.exe',[p,'/grant',
-      localService+':'+(fs.statSync(p).isDirectory()?'(OI)(CI)R':'R')]);
+      '*'+serviceSid+':'+(fs.statSync(p).isDirectory()?'(OI)(CI)R':'R')]);
   }
   for(const p of [dataRoot,workDir]){
-    cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)M']);
+    cmd('icacls.exe',[p,'/grant','*'+serviceSid+':(OI)(CI)M']);
   }
   for(const p of [appRoot,distPath,binDir]){
     cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)RX']);
@@ -240,15 +242,23 @@ async function main(){
   const verifiedSecurity=o=>verifyNodeServiceSecurity({
     nodeExe:o.agentExe,entryFile:o.nodeAgent.entryFile,
     workingDir:o.nodeAgent.workingDir,configFile:o.configFile,
-    nssmExe:o.nssmExe,serviceAccount:o.nodeAgent.serviceAccount
+    nssmExe:o.nssmExe,serviceAccount:o.nodeAgent.serviceAccount,
+    serviceSid:o.nodeAgent.serviceSid
   });
   const installer={
     serviceName,agentExe:trustedNode,ctlExe:trustedNode,
     nssmExe:serviceNssm,binDir:appRoot,configFile,
     nodeAgent:{entryFile:entry,workingDir:workDir,runtimeVersion:process.version,
-      serviceAccount:'NT AUTHORITY\\LocalService'},
+      serviceAccount:'NT AUTHORITY\\LocalService',serviceSid},
     fileExists:fs.existsSync,
     verifyNodeSecurity:verifiedSecurity,
+    configureServiceSid:async name=>{
+      assert.equal(name,serviceName,'SID setup may only target the QA service');
+      cmd('sc.exe',['sidtype',name,'unrestricted']);
+      assert.match(cmd('sc.exe',['qsidtype',name]).stdout,
+        /SERVICE_SID_TYPE\s*:\s*UNRESTRICTED/i,
+        'Actual SCM must report UNRESTRICTED service-specific SID type');
+    },
     run:async args=>{
       const r=cmd(serviceNssm,args,true);
       return {code:r.error?1:(r.status===null?1:r.status),
@@ -275,6 +285,9 @@ async function main(){
   const serviceConfig=cmd('sc.exe',['qc',serviceName]).stdout;
   assert.match(serviceConfig,/SERVICE_START_NAME\s*:\s*NT AUTHORITY\\LocalService/i,
     'Service identity must be LocalService; default LocalSystem is prohibited');
+  assert.match(cmd('sc.exe',['qsidtype',serviceName]).stdout,
+    /SERVICE_SID_TYPE\s*:\s*UNRESTRICTED/i,
+    'Windows service SID must be enabled in actual SCM');
   assert.equal(state(),'STOPPED','Installer must use demand-start, not auto-start');
   const params=cmd(serviceNssm,['get',serviceName,'AppParameters']).stdout;
   assert(params.includes('--env-file=')&&params.includes('index.js'),
@@ -288,7 +301,7 @@ async function main(){
     'genuine tenant-agent SQLite initialization',20000);
   await until(()=>sourceMarked&&outboxRow()?.sent===0&&outboxRow()?.retry_count>=1,
     'outbox pending while Central is unavailable',20000);
-  assert(verifyNodeSqliteArtifacts(workDir).includes('outbox.db'),
+  assert(verifyNodeSqliteArtifacts(workDir,serviceSid).includes('outbox.db'),
     'Live SQLite data must be restricted by real NTFS ACLs');
   assert.equal(centralEvents.size,0,'Offline mode must never fake central delivery');
   cmd('sc.exe',['stop',serviceName]);
@@ -297,12 +310,12 @@ async function main(){
   assert.equal(outboxRow()?.sent,0,'Unacknowledged event must survive SCM stop');
   // A database created at runtime must not accidentally become world-readable.
   // Exercise actual icacls/PowerShell ACLs after stop, BEFORE restarting SCM.
-  verifyNodeSqliteArtifacts(workDir);
+  verifyNodeSqliteArtifacts(workDir,serviceSid);
   cmd('icacls.exe',[dbPath,'/grant','*S-1-5-32-545:R']);
-  assert.throws(()=>verifyNodeSqliteArtifacts(workDir),/SQLite runtime ACL preflight denied/,
+  assert.throws(()=>verifyNodeSqliteArtifacts(workDir,serviceSid),/SQLite runtime ACL preflight denied/,
     'BUILTIN\\Users may not read an offline tenant SQLite database');
   cmd('icacls.exe',[dbPath,'/remove','*S-1-5-32-545']);
-  assert(verifyNodeSqliteArtifacts(workDir).includes('outbox.db'),
+  assert(verifyNodeSqliteArtifacts(workDir,serviceSid).includes('outbox.db'),
     'Restored private database ACL must pass before service restart');
 
   centralOnline=true;
@@ -324,7 +337,7 @@ async function main(){
   await until(()=>state()==='RUNNING','SCM restart before replay');
   await until(()=>duplicateCount>=1&&outboxRow()?.sent===1,
     'idempotent central replay after SCM restart');
-  assert(verifyNodeSqliteArtifacts(workDir).includes('outbox.db'),
+  assert(verifyNodeSqliteArtifacts(workDir,serviceSid).includes('outbox.db'),
     'Post-replay SQLite ACLs must remain restricted');
   assert.equal(centralEvents.size,1,'Duplicate retry must not duplicate central events');
   console.log('PASS genuine Node 22 tenant-agent: NSSM/SCM lifecycle, offline durable SQLite, restart delivery and idempotent replay');
