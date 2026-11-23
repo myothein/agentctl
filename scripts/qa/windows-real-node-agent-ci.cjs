@@ -207,6 +207,12 @@ async function verifySiblingIsolation(dbPath){
   cmd(serviceNssm,['set',siblingName,'Start','SERVICE_DEMAND_START']);
   cmd(serviceNssm,['set',siblingName,'AppExit','Default','Exit']);
   cmd('sc.exe',['sidtype',siblingName,'unrestricted']);
+  assert.match(cmd('sc.exe',['qc',siblingName]).stdout,
+    /SERVICE_START_NAME\s*:\s*NT AUTHORITY\\LocalService/i,
+    'Sibling must actually run under the same LocalService identity');
+  assert.match(cmd('sc.exe',['qsidtype',siblingName]).stdout,
+    /SERVICE_SID_TYPE\s*:\s*UNRESTRICTED/i,
+    'Sibling must have an independent service SID in its process token');
   assert.notEqual(resolveWindowsServiceSid(siblingName),serviceSid,
     'Sibling and tenant services must have different SIDs');
   cmd('sc.exe',['start',siblingName]);
