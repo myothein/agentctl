@@ -10,7 +10,7 @@ const child=require('node:child_process');
 const crypto=require('node:crypto');
 const http=require('node:http');
 const {installNewService}=require('../../dist/core/agent/safe-install.js');
-const {verifyNodeServiceSecurity}=require('../../dist/core/agent/windows-security-preflight.js');
+const {verifyNodeServiceSecurity,verifyNodeSqliteArtifacts}=require('../../dist/core/agent/windows-security-preflight.js');
 
 assert(process.platform==='win32' && process.env.CI==='true' &&
   process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_OS==='Windows' &&
@@ -267,11 +267,22 @@ async function main(){
     'genuine tenant-agent SQLite initialization',20000);
   await until(()=>sourceMarked&&outboxRow()?.sent===0&&outboxRow()?.retry_count>=1,
     'outbox pending while Central is unavailable',20000);
+  assert(verifyNodeSqliteArtifacts(workDir).includes('outbox.db'),
+    'Live SQLite data must be restricted by real NTFS ACLs');
   assert.equal(centralEvents.size,0,'Offline mode must never fake central delivery');
   cmd('sc.exe',['stop',serviceName]);
   await until(()=>state()==='STOPPED','actual Node.js service STOPPED');
   assert(fs.existsSync(dbPath),'Stopped service unexpectedly deleted SQLite outbox');
   assert.equal(outboxRow()?.sent,0,'Unacknowledged event must survive SCM stop');
+  // A database created at runtime must not accidentally become world-readable.
+  // Exercise actual icacls/PowerShell ACLs after stop, BEFORE restarting SCM.
+  verifyNodeSqliteArtifacts(workDir);
+  cmd('icacls.exe',[dbPath,'/grant','*S-1-5-32-545:R']);
+  assert.throws(()=>verifyNodeSqliteArtifacts(workDir),/SQLite runtime ACL preflight denied/,
+    'BUILTIN\\Users may not read an offline tenant SQLite database');
+  cmd('icacls.exe',[dbPath,'/remove','*S-1-5-32-545']);
+  assert(verifyNodeSqliteArtifacts(workDir).includes('outbox.db'),
+    'Restored private database ACL must pass before service restart');
 
   centralOnline=true;
   cmd('sc.exe',['start',serviceName]);
@@ -292,6 +303,8 @@ async function main(){
   await until(()=>state()==='RUNNING','SCM restart before replay');
   await until(()=>duplicateCount>=1&&outboxRow()?.sent===1,
     'idempotent central replay after SCM restart');
+  assert(verifyNodeSqliteArtifacts(workDir).includes('outbox.db'),
+    'Post-replay SQLite ACLs must remain restricted');
   assert.equal(centralEvents.size,1,'Duplicate retry must not duplicate central events');
   console.log('PASS genuine Node 22 tenant-agent: NSSM/SCM lifecycle, offline durable SQLite, restart delivery and idempotent replay');
 }
