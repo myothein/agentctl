@@ -10,7 +10,7 @@ const child=require('node:child_process');
 const crypto=require('node:crypto');
 const http=require('node:http');
 const {installNewService}=require('../../dist/core/agent/safe-install.js');
-const {verifyNodeServiceSecurity,verifyNodeBackupProvisioning,verifyNodeSqliteArtifacts,resolveWindowsServiceSid}=require('../../dist/core/agent/windows-security-preflight.js');
+const {verifyNodeServiceSecurity,verifyNodeBackupProvisioning,verifyNodeBackupArtifacts,verifyNodeSqliteArtifacts,resolveWindowsServiceSid}=require('../../dist/core/agent/windows-security-preflight.js');
 
 assert(process.platform==='win32' && process.env.CI==='true' &&
   process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_OS==='Windows' &&
@@ -434,6 +434,38 @@ async function main(){
   await until(()=>state()==='STOPPED','actual Node.js service STOPPED');
   assert(fs.existsSync(dbPath),'Stopped service unexpectedly deleted SQLite outbox');
   assert.equal(outboxRow()?.sent,0,'Unacknowledged event must survive SCM stop');
+  // Startup and graceful-shutdown snapshots must be independently readable,
+  // but more importantly the generated *file* (not only its parent folder)
+  // must have the service-scoped NTFS ACL with OWNER RIGHTS protection.
+  const backupFiles=verifyNodeBackupArtifacts(backupDir,serviceSid);
+  let recoveredPending=false;
+  let recoveryPath='';
+  for(const name of backupFiles){
+    const full=path.join(backupDir,name);
+    const snapshot=new Database(full,{readonly:true,fileMustExist:true});
+    try{
+      assert.equal(snapshot.pragma('integrity_check',{simple:true}),'ok');
+      const row=snapshot.prepare('SELECT id,sent FROM outbox WHERE id=?').get(eventId);
+      if(row?.id===eventId&&row?.sent===0){
+        recoveredPending=true;
+        recoveryPath=full;
+      }
+    }finally{snapshot.close();}
+  }
+  assert(recoveredPending,
+    'Gracefully stopped agent did not publish a restorable pending event');
+  // Disposable CI negative ACL probe. A nonprivileged BUILTIN\\Users reader
+  // must not be allowed to inspect a finalized tenant recovery snapshot.
+  cmd('icacls.exe',[recoveryPath,'/grant','*S-1-5-32-545:R']);
+  try{
+    assert.throws(()=>verifyNodeBackupArtifacts(backupDir,serviceSid),
+      /backup snapshot ACL verification failed/,
+      'Backup with untrusted read grant must fail independent ACL acceptance');
+  }finally{
+    cmd('icacls.exe',[recoveryPath,'/remove','*S-1-5-32-545']);
+  }
+  assert(verifyNodeBackupArtifacts(backupDir,serviceSid).length>=1,
+    'Backup ACL must be restored before restarting the agent');
   inspectSyntheticSqliteOwner(dbPath);
   // Execute a second Windows service under the SAME LocalService account but
   // with a DIFFERENT service SID. It must not read our SQLite file or gain
