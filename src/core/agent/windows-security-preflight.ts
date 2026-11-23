@@ -130,17 +130,34 @@ export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void
     const appDirectory=path.win32.dirname(path.win32.dirname(options.entryFile));
     const configDir=path.win32.dirname(options.configFile);
     const dataRoot=path.win32.dirname(options.workingDir);
-    for(const p of [options.nodeExe,options.entryFile,
-        path.win32.dirname(options.entryFile),appDirectory,options.nssmExe]){
-        unique.set(p,'code');
-    }
-    for(const p of [options.configFile,configDir,
-        options.workingDir,dataRoot]){
+    const roles=new Map<string,string>();
+    for(const [p,role] of [
+        [options.configFile,'secret config'],
+        [configDir,'config directory'],
+        [options.workingDir,'runtime directory'],
+        [dataRoot,'runtime data root'],
+    ]){
         unique.set(p,'private');
+        roles.set(p,role);
+    }
+    for(const [p,role] of [
+        [options.nodeExe,'Node executable'],
+        [options.entryFile,'agent entry'],
+        [path.win32.dirname(options.entryFile),'compiled output directory'],
+        [appDirectory,'application directory'],
+        [options.nssmExe,'NSSM executable']
+    ]){
+        unique.set(p,'code');
+        roles.set(p,role);
     }
     const evidence=inspectWindowsAclBatch([...unique.keys()]);
     let index=0;
-    for(const kind of unique.values()){
-        assertAclSnapshot(evidence[index++],kind);
+    for(const [p,kind] of unique){
+        try {
+            assertAclSnapshot(evidence[index++],kind);
+        }catch(error) {
+            const reason=error instanceof Error?error.message:'invalid ACL';
+            throw Error('Windows ACL '+roles.get(p)+': '+reason);
+        }
     }
 }
