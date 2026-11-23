@@ -25,6 +25,8 @@ const serviceName='GTSPNodeAgentQA_'+id;
 const programFiles=process.env.ProgramFiles||'C:\\Program Files';
 const programData=process.env.ProgramData||'C:\\ProgramData';
 const appRoot=path.join(programFiles,'TenantAgent','app');
+const binDir=path.join(programFiles,'TenantAgent','bin');
+const trustedNode=path.join(binDir,'node.exe');
 const distPath=path.join(appRoot,'dist');
 const entry=path.join(distPath,'index.js');
 const dataRoot=path.join(programData,'TenantAgent');
@@ -116,6 +118,14 @@ async function main(){
   // Create a disposable, complete Node app with compiled JS, its package type
   // and native modules. No production credentials or service binaries are used.
   fs.mkdirSync(appRoot,{recursive:true});stagedApp=true;
+  fs.mkdirSync(binDir,{recursive:true});
+  fs.copyFileSync(process.execPath,trustedNode);
+  // The GitHub toolcache Node path is intentionally writable by CI accounts,
+  // so it fails the application integrity ACL gate. Stage an identical verified
+  // Node binary in the restricted Program Files test app instead.
+  const digest=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  assert.equal(digest(trustedNode),digest(process.execPath),
+    'Copied Node 22 runtime hash does not match the exact CI source');
   fs.cpSync(path.join(source,'dist'),distPath,{recursive:true});
   fs.copyFileSync(path.join(source,'package.json'),path.join(appRoot,'package.json'));
   fs.cpSync(path.join(source,'node_modules'),path.join(appRoot,'node_modules'),{
@@ -177,7 +187,8 @@ async function main(){
 
   // Windows POSIX mode 0600 is NOT an NTFS ACL. Explicitly remove inherited
   // group grants and allow only SYSTEM + local Administrators on CI private data.
-  for(const p of [dataRoot,workDir,configDir,configFile]){
+  for(const p of [dataRoot,workDir,configDir,configFile,
+    appRoot,distPath,entry,binDir,trustedNode]){
     cmd('icacls.exe',[p,'/inheritance:r']);
     cmd('icacls.exe',[p,'/grant:r',
       '*S-1-5-18:(OI)(CI)F'.replace(':(OI)(CI)F',
@@ -192,7 +203,7 @@ async function main(){
     nssmExe:o.nssmExe
   });
   const installer={
-    serviceName,agentExe:process.execPath,ctlExe:process.execPath,
+    serviceName,agentExe:trustedNode,ctlExe:trustedNode,
     nssmExe:nssm,binDir:appRoot,configFile,
     nodeAgent:{entryFile:entry,workingDir:workDir,runtimeVersion:process.version},
     fileExists:fs.existsSync,
