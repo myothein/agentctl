@@ -85,11 +85,13 @@ const nodeServiceFixture={
     ctlExe:'C:\\Program Files\\nodejs\\node.exe',
     configFile:'C:\\ProgramData\\TenantAgent\\config\\agent.env',
     verifyNodeSecurity:()=>undefined,
+    configureServiceSid:async()=>undefined,
     nodeAgent:{
         entryFile:'C:\\Program Files\\TenantAgent\\app\\dist\\index.js',
         workingDir:'C:\\ProgramData\\TenantAgent\\runtime',
         runtimeVersion:'v22.15.0',
-        serviceAccount:'NT AUTHORITY\\LocalService' as const
+        serviceAccount:'NT AUTHORITY\\LocalService' as const,
+        serviceSid:'S-1-5-80-123-456-789-101-112'
     }
 };
 
@@ -167,6 +169,7 @@ test('node install always refuses a missing or rejected ACL preflight before NSS
     assert.deepEqual(x.history,[]);
 });
 
+const unitServiceSid='S-1-5-80-123-456-789-101-112';
 const trustedAcl:AclSnapshot={
     reparse:false,
     entries:[
@@ -228,7 +231,7 @@ test('Node service identity setup failure rolls back the new service',async()=>{
 });
 
 test('LocalService config read without write and runtime limited Modify must be explicit',()=>{
-    const sid='S-1-5-19';
+    const sid=unitServiceSid;
     const readonly={
         ...trustedAcl,
         entries:[...trustedAcl.entries,{sid,type:'Allow',rights:131209}]
@@ -237,23 +240,74 @@ test('LocalService config read without write and runtime limited Modify must be 
         ...trustedAcl,
         entries:[...trustedAcl.entries,{sid,type:'Allow',rights:1245631}]
     };
-    assert.doesNotThrow(()=>assertAclSnapshot(readonly,'service-config'));
-    assert.doesNotThrow(()=>assertAclSnapshot(runtime,'service-runtime'));
-    assert.throws(()=>assertAclSnapshot(trustedAcl,'service-config'),/explicit LocalService/);
-    assert.throws(()=>assertAclSnapshot(readonly,'service-runtime'),/explicit LocalService/);
-    assert.throws(()=>assertAclSnapshot(runtime,'service-config'),/must not write/);
+    assert.doesNotThrow(()=>assertAclSnapshot(readonly,'service-config',unitServiceSid));
+    assert.doesNotThrow(()=>assertAclSnapshot(runtime,'service-runtime',unitServiceSid));
+    assert.throws(()=>assertAclSnapshot(trustedAcl,'service-config',unitServiceSid),/explicit per-service SID/);
+    assert.throws(()=>assertAclSnapshot(readonly,'service-runtime',unitServiceSid),/explicit per-service SID/);
+    assert.throws(()=>assertAclSnapshot(runtime,'service-config',unitServiceSid),/must not write/);
     const full={
         ...trustedAcl,
         entries:[...trustedAcl.entries,{sid,type:'Allow',rights:2032127}]
     };
-    assert.throws(()=>assertAclSnapshot(full,'service-runtime'),/permission escalation/);
+    assert.throws(()=>assertAclSnapshot(full,'service-runtime',unitServiceSid),/permission escalation/);
     const denied={
         ...runtime,entries:[...runtime.entries,{sid,type:'Deny',rights:1}]
     };
-    assert.throws(()=>assertAclSnapshot(denied,'service-runtime'),/explicitly denied/);
+    assert.throws(()=>assertAclSnapshot(denied,'service-runtime',unitServiceSid),/explicitly denied/);
     const foreign={
         ...runtime,entries:[...runtime.entries,
             {sid:'S-1-5-32-545',type:'Allow',rights:131209}]
     };
-    assert.throws(()=>assertAclSnapshot(foreign,'service-runtime'),/untrusted private/);
+    assert.throws(()=>assertAclSnapshot(foreign,'service-runtime',unitServiceSid),/untrusted private/);
+});
+
+
+test('Node installation refuses missing or malformed service SID before NSSM',async()=>{
+    const x=scenario({code:3,stderr:"Can't open service"});
+    const incorrect=[undefined,'S-1-5-19','S-1-5-80-123'];
+    for(const serviceSid of incorrect){
+        await assert.rejects(
+            ()=>installNewService({...x.options,...nodeServiceFixture,
+                nodeAgent:{...nodeServiceFixture.nodeAgent,serviceSid:serviceSid as string}}),
+            /per-service SID/
+        );
+    }
+    await assert.rejects(
+        ()=>installNewService({...x.options,...nodeServiceFixture,configureServiceSid:undefined}),
+        /SID configuration is required/
+    );
+    assert.deepEqual(x.history,[]);
+});
+
+test('per-service SID registration failure rolls back without starting Node service',async()=>{
+    const x=scenario({code:3,stderr:"Can't open service"});
+    let attempts=0;
+    await assert.rejects(
+        ()=>installNewService({...x.options,...nodeServiceFixture,configureServiceSid:async()=>{
+            attempts++;
+            throw Error('Simulated sc.exe sidtype failed');
+        }}),
+        /sidtype failed/
+    );
+    assert.equal(attempts,1);
+    assert.deepEqual(x.history.at(-1),['remove','tenant-agent','confirm']);
+    assert.equal(x.history.some(x=>x[0]==='set'&&x[2]==='Start'),false);
+});
+
+test('service SID is required on config/SQLite and shared LocalService grants are refused',()=>{
+    const localService='S-1-5-19';
+    const secure={
+        ...trustedAcl,
+        entries:[...trustedAcl.entries,
+            {sid:unitServiceSid,type:'Allow',rights:131209}]
+    };
+    assert.doesNotThrow(()=>assertAclSnapshot(secure,'service-config',unitServiceSid));
+    const broadShared={
+        ...secure,entries:[...secure.entries,
+            {sid:localService,type:'Allow',rights:131209}]
+    };
+    assert.throws(()=>assertAclSnapshot(broadShared,'service-config',unitServiceSid),
+        /untrusted private/);
+    assert.throws(()=>assertAclSnapshot(secure,'service-config'),
+        /Validated per-service SID/);
 });
