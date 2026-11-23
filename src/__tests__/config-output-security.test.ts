@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { safeConfigurationKey, safeConfigurationValue } from '../utils/config-redaction';
+import { safeConfigurationKey, safeConfigurationValue, parseNonSecretCliAssignment } from '../utils/config-redaction';
 
 const placeholder = 'synthetic-secret-token-never-emit-0123456789';
 
@@ -43,4 +43,32 @@ test('malformed configuration keys cannot inject log or terminal content', () =>
     assert.equal(safeConfigurationKey('API_KEY\nsecret=abc'), '[INVALID_KEY]');
     assert.equal(safeConfigurationKey('BAD KEY'), '[INVALID_KEY]');
     assert.equal(safeConfigurationKey('=CONTAINS=EQUALS'), '[INVALID_KEY]');
+});
+
+
+test('credential-bearing config set arguments are rejected before writes or admin operations', () => {
+    for (const pair of [
+        'CENTRAL_AGENT_API_KEY=synthetic-private-value',
+        'DATABASE_URL=postgresql://user:pass@db.example/test',
+        'KEYCLOAK_CLIENT_SECRET=hidden',
+        'JWT_PRIVATE_KEY=material',
+        'SYSTEM_AUTH_TOKEN=token',
+        'TENANT_PASSWORD=secret',
+        'AWS_ACCESS_KEY=secret',
+        'INVALID\nKEY=injected',
+        'TENANT_ID=valid\nINJECTED=secret',
+        'NO_EQUALS',
+        '=bad'
+    ]) {
+        assert.throws(() => parseNonSecretCliAssignment(pair), /Invalid|Unsafe|Expected/);
+    }
+});
+
+test('nonsecret config CLI assignments remain functional and preserve equals sign', () => {
+    assert.deepEqual(parseNonSecretCliAssignment('TENANT_ID=university-qa'),
+        { key: 'TENANT_ID', value: 'university-qa' });
+    assert.deepEqual(parseNonSecretCliAssignment('LOG_LEVEL=info'),
+        { key: 'LOG_LEVEL', value: 'info' });
+    assert.deepEqual(parseNonSecretCliAssignment('NOTES=key=value'),
+        { key: 'NOTES', value: 'key=value' });
 });
