@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { installNewService, InstallOptions } from '../core/agent/safe-install';
-import { assertAclSnapshot, AclSnapshot } from '../core/agent/windows-security-preflight';
+import { assertAclSnapshot, assertNodeBackupLocation, AclSnapshot } from '../core/agent/windows-security-preflight';
 import { assertExpectedSha256 } from '../core/self-update/verify';
 import { applyUpdate } from '../update/apply';
 
@@ -343,4 +343,34 @@ test('generated service-owned SQLite files must protect owner implicit WRITE_DAC
         ()=>assertAclSnapshot(ownerDataRead,'service-runtime',unitServiceSid),
         /OWNER RIGHTS must not grant/
     );
+});
+
+
+test('Node tenant-agent production backup is absolute and outside app and runtime trees', () => {
+    const entry = 'C:\\Program Files\\TenantAgent\\app\\dist\\index.js';
+    const runtime = 'C:\\ProgramData\\TenantAgent\\runtime';
+    const backup = 'C:\\ProgramData\\TenantAgent\\verified-backups';
+    assert.equal(assertNodeBackupLocation('production', backup, entry, runtime), backup);
+    for (const rejected of [
+        undefined,
+        '',
+        '.\\backups',
+        'backups',
+        'C:\\ProgramData\\TenantAgent\\runtime\\backups',
+        'C:\\Program Files\\TenantAgent\\backup',
+        'C:\\Program Files\\TenantAgent\\app\\dist\\backup',
+        'C:\\ProgramData\\TenantAgent\\runtime\\..\\verified-backups',
+        '\\\\untrusted-host\\share\\backup',
+        'C:\\ProgramData\\TenantAgent\\backup" --eval',
+        'C:\\ProgramData\\TenantAgent\\backup\nINJECTED=1'
+    ]) {
+        assert.throws(
+            () => assertNodeBackupLocation('production', rejected, entry, runtime),
+            /backup/i,
+            'Unsafe backup destination must be blocked'
+        );
+    }
+    assert.throws(() => assertNodeBackupLocation('development', backup, entry, runtime),
+        /backup/i,
+        'Node Windows service must explicitly opt into production config');
 });
