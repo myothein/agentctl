@@ -65,6 +65,44 @@ function cmd(exe,args,allowFailure=false){
   }
   return r;
 }
+function grantServiceSidAcl(target,right){
+  // A service-specific SID may not yet be registered as an account. icacls
+  // can fail 1332 on pre-install SID name lookup, so write the SID object
+  // directly to a discretionary NTFS ACL without weakening fail-closed install.
+  assert(/^(Read|Modify)$/.test(right));
+  const script=String.raw`
+$ErrorActionPreference='Stop'
+$module=Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+Import-Module -Name $module -ErrorAction Stop
+$p=$env:GTSP_ACL_FILE
+$sid=[Security.Principal.SecurityIdentifier]::new($env:GTSP_SERVICE_SID)
+$acl=Get-Acl -LiteralPath $p -ErrorAction Stop
+$item=Get-Item -LiteralPath $p -Force -ErrorAction Stop
+$flags=[Security.AccessControl.InheritanceFlags]::None
+if($item.PSIsContainer){
+  $flags=[Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+    [Security.AccessControl.InheritanceFlags]::ObjectInherit
+}
+$rule=[Security.AccessControl.FileSystemAccessRule]::new(
+  $sid,[Security.AccessControl.FileSystemRights]$env:GTSP_ACL_RIGHT,
+  $flags,[Security.AccessControl.PropagationFlags]::None,
+  [Security.AccessControl.AccessControlType]::Allow)
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
+`;
+  const result=child.spawnSync('powershell.exe',[
+    '-NoProfile','-NonInteractive','-EncodedCommand',
+    Buffer.from(script,'utf16le').toString('base64')
+  ],{
+    windowsHide:true,encoding:'utf8',timeout:15000,
+    env:{...process.env,GTSP_ACL_FILE:target,GTSP_SERVICE_SID:serviceSid,
+      GTSP_ACL_RIGHT:right},
+    stdio:['ignore','pipe','pipe']
+  });
+  if(result.error||result.status!==0){
+    throw Error('Windows CI could not pre-provision a service-specific SID ACL');
+  }
+}
 function state(){
   const r=cmd('sc.exe',['query',serviceName],true);
   if(r.status!==0)return null;
@@ -226,13 +264,8 @@ async function main(){
   // needs. No LocalService write permission is granted on executable code.
   const localService='*S-1-5-19';
   // Service-specific SID is the only nonprivileged private data principal.
-  for(const p of [configDir,configFile]){
-    cmd('icacls.exe',[p,'/grant',
-      '*'+serviceSid+':'+(fs.statSync(p).isDirectory()?'(OI)(CI)R':'R')]);
-  }
-  for(const p of [dataRoot,workDir]){
-    cmd('icacls.exe',[p,'/grant','*'+serviceSid+':(OI)(CI)M']);
-  }
+  for(const p of [configDir,configFile])grantServiceSidAcl(p,'Read');
+  for(const p of [dataRoot,workDir])grantServiceSidAcl(p,'Modify');
   for(const p of [appRoot,distPath,binDir]){
     cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)RX']);
   }
