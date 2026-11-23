@@ -10,9 +10,11 @@ export type InstallOptions = {
     binDir:string;
     configFile:string;
     /** Optional Node 22 service mode: original EXE mode remains unchanged. */
-    nodeAgent?: { entryFile:string; workingDir:string; runtimeVersion:string; serviceAccount:'NT AUTHORITY\\LocalService' };
+    nodeAgent?: { entryFile:string; workingDir:string; runtimeVersion:string; serviceAccount:'NT AUTHORITY\\LocalService'; serviceSid:string };
     /** Mandatory Node-mode read-only ACL verification before any NSSM operation. */
     verifyNodeSecurity?: (options:InstallOptions)=>void | Promise<void>;
+    /** Mandatory independent SC sidtype operation for Node mode. */
+    configureServiceSid?: (name:string)=>void | Promise<void>;
     fileExists:(file:string)=>boolean;
     run:(args:string[])=>Promise<CommandResult>;
 };
@@ -31,7 +33,10 @@ function quoteWindowsArgument(value:string):string {
 }
 function nodeServiceParameters(options:InstallOptions):string|null {
     if(!options.nodeAgent)return null;
-    const {entryFile,workingDir,runtimeVersion,serviceAccount}=options.nodeAgent;
+    const {entryFile,workingDir,runtimeVersion,serviceAccount,serviceSid}=options.nodeAgent;
+    if(!/^S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}$/.test(serviceSid)){
+        throw new Error('Node service requires a validated per-service SID');
+    }
     if(serviceAccount!=='NT AUTHORITY\\LocalService') {
         throw new Error('Node service requires an explicit low-privilege LocalService identity');
     }
@@ -74,6 +79,9 @@ export async function installNewService(options:InstallOptions):Promise<void> {
         if(!options.verifyNodeSecurity){
             throw new Error('Node service ACL security verification is required');
         }
+        if(!options.configureServiceSid){
+            throw new Error('Node service SID configuration is required');
+        }
         await options.verifyNodeSecurity(options);
     }
     const status=await options.run(['status',options.serviceName]);
@@ -102,6 +110,9 @@ export async function installNewService(options:InstallOptions):Promise<void> {
             // any account configuration failure rolls back only this new service.
             await mustSucceed(options.run,['set',options.serviceName,'ObjectName',
                 options.nodeAgent.serviceAccount,''], 'NSSM least-privilege ObjectName');
+        }
+        if(options.nodeAgent){
+            await options.configureServiceSid!(options.serviceName);
         }
         // The service is intentionally demand-start: runtime secrets/ACLs require independent QA.
         await mustSucceed(options.run,['set',options.serviceName,'Start','SERVICE_DEMAND_START'],
