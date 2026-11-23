@@ -6,6 +6,7 @@ import { runCommand } from '../../utils/exec';
 import { fileExists } from '../../utils/fs';
 import { SERVICE_NAME } from '../../constants/service';
 import { installNewService } from '../../core/agent/safe-install';
+import { verifyNodeServiceSecurity } from '../../core/agent/windows-security-preflight';
 
 const programFiles=path.win32.join('C:\\','Program Files','TenantAgent');
 const programData=path.win32.join('C:\\','ProgramData','TenantAgent');
@@ -43,6 +44,13 @@ export const install=new Command('install')
                     runtimeVersion
                 }}:{}),
                 fileExists,
+                ...(options.nodeRuntime?{verifyNodeSecurity:({agentExe,nodeAgent,configFile,nssmExe})=>{
+                    if(!nodeAgent)throw new Error('Missing Node service configuration');
+                    verifyNodeServiceSecurity({
+                        nodeExe:agentExe,entryFile:nodeAgent.entryFile,
+                        configFile,workingDir:nodeAgent.workingDir,nssmExe
+                    });
+                }}:{}),
                 run:async args=>runCommand(path.win32.join(binDir,'nssm.exe'),args,{silent:true})
             });
             console.log('New tenant-agent Windows service registered in MANUAL START mode.');
