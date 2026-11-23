@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { installNewService, InstallOptions } from '../core/agent/safe-install';
+import { assertAclSnapshot, AclSnapshot } from '../core/agent/windows-security-preflight';
 import { assertExpectedSha256 } from '../core/self-update/verify';
 import { applyUpdate } from '../update/apply';
 
@@ -83,6 +84,7 @@ const nodeServiceFixture={
     agentExe:'C:\\Program Files\\nodejs\\node.exe',
     ctlExe:'C:\\Program Files\\nodejs\\node.exe',
     configFile:'C:\\ProgramData\\TenantAgent\\config\\agent.env',
+    verifyNodeSecurity:()=>undefined,
     nodeAgent:{
         entryFile:'C:\\Program Files\\TenantAgent\\app\\dist\\index.js',
         workingDir:'C:\\ProgramData\\TenantAgent\\runtime',
@@ -140,4 +142,57 @@ test('opt-in Node install refuses an existing service without changing its param
     const x=scenario({code:0,stdout:'SERVICE_RUNNING',stderr:''});
     await assert.rejects(()=>installNewService({...x.options,...nodeServiceFixture}),/already exists/);
     assert.deepEqual(x.history,[['status','tenant-agent']]);
+});
+
+
+test('node install always refuses a missing or rejected ACL preflight before NSSM status',async()=>{
+    const x=scenario({code:3,stderr:"Can't open service"});
+    await assert.rejects(
+        ()=>installNewService({...x.options,...nodeServiceFixture,verifyNodeSecurity:undefined}),
+        /ACL security verification is required/
+    );
+    assert.deepEqual(x.history,[]);
+    let checked=0;
+    await assert.rejects(
+        ()=>installNewService({...x.options,...nodeServiceFixture,
+            verifyNodeSecurity:async()=>{
+                checked++;
+                throw Error('Windows ACL preflight denied');
+            }}),
+        /Windows ACL preflight denied/
+    );
+    assert.equal(checked,1);
+    assert.deepEqual(x.history,[]);
+});
+
+const trustedAcl:AclSnapshot={
+    reparse:false,
+    entries:[
+        {sid:'S-1-5-18',type:'Allow',rights:2032127},
+        {sid:'S-1-5-32-544',type:'Allow',rights:2032127}
+    ]
+};
+test('ACL preflight permits only privileged private config / runtime grants',()=>{
+    assert.doesNotThrow(()=>assertAclSnapshot(trustedAcl,'private'));
+    const broad={...trustedAcl,entries:[
+        ...trustedAcl.entries,{sid:'S-1-5-32-545',type:'Allow',rights:131209}
+    ]};
+    assert.throws(()=>assertAclSnapshot(broad,'private'),/untrusted private/);
+    assert.doesNotThrow(()=>assertAclSnapshot(broad,'code'),
+        'Read-only access to installed application must remain possible');
+    const groupWrite={...trustedAcl,entries:[
+        ...trustedAcl.entries,{sid:'S-1-5-11',type:'Allow',rights:197055}
+    ]};
+    assert.throws(()=>assertAclSnapshot(groupWrite,'code'),/application write/);
+    assert.throws(()=>assertAclSnapshot(groupWrite,'private'),/untrusted private/);
+});
+test('ACL preflight fails closed on reparse points, malformed ACLs and absent SYSTEM access',()=>{
+    assert.throws(()=>assertAclSnapshot({...trustedAcl,reparse:true},'private'),/redirected/);
+    assert.throws(()=>assertAclSnapshot({reparse:false,entries:[]},'code'),/invalid/);
+    assert.throws(()=>assertAclSnapshot({reparse:false,entries:[{
+        sid:'unknown identity',type:'Allow',rights:2032127
+    }]},'private'),/cannot interpret/);
+    assert.throws(()=>assertAclSnapshot({reparse:false,entries:[{
+        sid:'S-1-5-32-544',type:'Allow',rights:2032127
+    }]},'private'),/SYSTEM write/);
 });
