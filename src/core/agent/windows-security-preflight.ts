@@ -338,3 +338,39 @@ export function verifyNodeBackupProvisioning(options: {
         throw Error('Node agent backup ACL security preflight refused');
     }
 }
+
+
+/**
+ * Post-start proof that the service generated at least one finalized SQLite
+ * recovery snapshot and that the snapshot file itself has the same
+ * per-service ACL restrictions as its dedicated directory.
+ * Call only in disposable Windows SCM QA or owner-approved read-only audit.
+ */
+export function verifyNodeBackupArtifacts(backupDir:string,serviceSid:string):string[] {
+    if(process.platform!=='win32'||!serviceSidPattern.test(serviceSid)){
+        throw Error('Windows backup verification requires per-service SID');
+    }
+    let names:string[];
+    try {
+        if(!fs.statSync(backupDir).isDirectory()){
+            throw Error('Not a backup directory');
+        }
+        names=fs.readdirSync(backupDir).filter(name=>
+            /^outbox-backup-[0-9TZa-zA-Z-]+-[0-9a-fA-F-]{36}\.db$/.test(name));
+        if(names.length===0)throw Error('No verified recovery snapshot found');
+        for(const name of names){
+            if(!fs.statSync(path.win32.join(backupDir,name)).isFile()){
+                throw Error('Unexpected backup artifact type');
+            }
+        }
+    }catch{
+        throw Error('Windows backup snapshot availability verification failed');
+    }
+    const targets=[backupDir,...names.map(name=>path.win32.join(backupDir,name))];
+    const aclEvidence=inspectWindowsAclBatch(targets);
+    for(const entry of aclEvidence){
+        try {assertAclSnapshot(entry,'service-runtime',serviceSid);}
+        catch {throw Error('Windows backup snapshot ACL verification failed');}
+    }
+    return names.sort();
+}
