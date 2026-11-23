@@ -18,14 +18,17 @@ const script=String.raw`
 $ErrorActionPreference='Stop'
 $p=$env:GTSP_ACL_TARGET
 if (-not $p) { throw 'No ACL target' }
-$node=Get-Item -LiteralPath $p -Force -ErrorAction Stop
+$cursor=[IO.Path]::GetFullPath($p)
 $reparse=$false
-while ($null -ne $node) {
+while ($cursor) {
+  $node=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
   if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     $reparse=$true
     break
   }
-  $node=$node.Parent
+  $up=[IO.Path]::GetDirectoryName($cursor.TrimEnd('\'))
+  if (-not $up -or $up -eq $cursor) { break }
+  $cursor=$up
 }
 $a=Get-Acl -LiteralPath $p -ErrorAction Stop
 $rules=@(foreach ($r in $a.Access) {
