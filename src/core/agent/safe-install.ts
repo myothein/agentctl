@@ -16,10 +16,10 @@ export type InstallOptions = {
 };
 /** Windows paths reach NSSM AppParameters; reject quoting/control/shell ambiguity. */
 function requireWindowsFilePath(value:string,label:string):string {
-    if (typeof value !== 'string' || !/^[A-Za-z]:\\\\/.test(value) ||
+    if (typeof value !== 'string' || !/^[A-Za-z]:\\/.test(value) ||
         /[\u0000-\u001f"<>|?*]/.test(value) ||
         value !== path.win32.normalize(value) ||
-        value.endsWith('\\\\') || value.length > 240) {
+        value.endsWith('\\') || value.length > 240) {
         throw new Error('Invalid '+label+' Windows path');
     }
     return value;
@@ -30,19 +30,19 @@ function quoteWindowsArgument(value:string):string {
 function nodeServiceParameters(options:InstallOptions):string|null {
     if(!options.nodeAgent)return null;
     const {entryFile,workingDir,runtimeVersion}=options.nodeAgent;
-    if(!/^v22\\.\\d+\\.\\d+$/.test(runtimeVersion) ||
-        !/\\\\node\\.exe$/i.test(options.agentExe)) {
+    if(!/^v22\.\d+\.\d+$/.test(runtimeVersion) ||
+        !/\\node\.exe$/i.test(options.agentExe)) {
         throw new Error('Node service mode requires a verified Node 22 executable');
     }
     requireWindowsFilePath(options.agentExe,'Node executable');
     requireWindowsFilePath(entryFile,'Node agent entry');
     requireWindowsFilePath(workingDir,'Node working directory');
     requireWindowsFilePath(options.configFile,'Node config');
-    if(!/\\\\index\\.js$/i.test(entryFile) ||
-       !entryFile.toLowerCase().includes('\\\\tenantagent\\\\app\\\\dist\\\\')) {
-        throw new Error('Node service entry must be staged under TenantAgent\\\\app\\\\dist');
+    if(!/\\index\.js$/i.test(entryFile) ||
+       !entryFile.toLowerCase().includes('\\tenantagent\\app\\dist\\')) {
+        throw new Error('Node service entry must be staged under TenantAgent\\app\\dist');
     }
-    if (!workingDir.toLowerCase().includes('\\\\programdata\\\\tenantagent\\\\runtime')) {
+    if (!workingDir.toLowerCase().includes('\\programdata\\tenantagent\\runtime')) {
         throw new Error('Node service working directory must use protected ProgramData');
     }
     // Node --env-file only passes a config FILE PATH, never secret values to SCM.
