@@ -21,3 +21,14 @@ Do not integrate with UIMS V1 until the six infrastructure repositories pass the
 ## CI verification scope
 
 The initial CI jobs check tracked-file hygiene, dependency lockfile presence, clean npm installation and TypeScript compilation. A successful result **does not** prove authentication, database migrations, offline data safety, functional tests, device integration, signing, or production readiness. Keep the PR as draft until independent release criteria pass.
+
+## CLI credential disclosure hardening — 2026-11-23
+
+- Added a **default-deny** terminal display policy. `config get`, `config list`, and `config diff` redact all unapproved configuration keys (including passwords, database URLs, API keys, private keys and tokens). Only strictly validated nonsecret operational fields may be displayed.
+- Removed raw CLI argument logging and suppressed raw exception messages/stacks from the process-level error logger. Failed commands now set a nonzero process exit code.
+- Removed the hardcoded fake `1.0.1` latest release and fictional temporary update binary path. Legacy `checkUpdate` and `autoUpdate` fail closed until an authenticated, signed update source is implemented. Signed artifact verification-only and the existing staged rollback QA code remain intact.
+- Added synthetic regression tests for credential redaction, malformed identifiers and blocked unsigned update discovery.
+- Tests do NOT prove the safety of every legacy command. In particular, `config set KEY=VALUE` and `config add-new KEY=VALUE` can expose values through the operating system process command line / shell history even if agentctl's own logger does not write arguments. Provision runtime secrets through a protected channel, not these CLI arguments.
+- Configuration backup ACL/encryption, key rotation, actual Windows service installation/upgrade/rollback, UAC/least privilege, and independent signed release key approval remain open **PRODUCTION NO-GO** acceptance gates.
+
+No production service, secret store, repository visibility, or UIMS application was modified by this work.
