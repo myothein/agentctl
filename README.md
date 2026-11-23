@@ -17,7 +17,7 @@ There are two deliberately separate installation paths:
 
 **Verified disposable Windows SCM test:** the genuine compiled tenant-agent and native SQLite modules ran as a manually started NSSM service. Tests covered start/stop/restart, offline queue persistence, Central recovery delivery and duplicate replay without duplicating the accepted event. All five CI jobs PASS: https://github.com/myothein/agentctl/actions/runs/45097352354 .
 
-**Production remains NO-GO:** source/npm dependency signing and reproducibility, least-privilege service identity, Windows NTFS ACLs, secret custody, trusted update channel, off-host restore, live Central/Keycloak and installation approval are outstanding. The old Node 18 `pkg` target is not a validated packaging route for Node 22/native SQLite. No production service or data was changed by the hosted QA.
+**Production remains NO-GO:** the Node-mode installer now explicitly uses the lower-privilege Windows `NT AUTHORITY\\LocalService` account, with hosted Windows SCM verification. However, per-tenant service SID isolation, signed/reproducible Node and npm distribution, complete WAL/log/backup ACL governance, secret custody, trusted update channel, off-host restore, real Central/Keycloak and operator-approved installation remain outstanding. A shared LocalService account is not equivalent to one isolated identity per university. The old Node 18 `pkg` target is not a validated packaging route for Node 22/native SQLite. No production service or data was changed by the hosted QA.
 
 See [Node Service Installation Acceptance](docs/WINDOWS_NODE_SERVICE_INSTALL_ACCEPTANCE.md).
 
