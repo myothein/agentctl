@@ -11,6 +11,8 @@ export type InstallOptions = {
     configFile:string;
     /** Optional Node 22 service mode: original EXE mode remains unchanged. */
     nodeAgent?: { entryFile:string; workingDir:string; runtimeVersion:string };
+    /** Mandatory Node-mode read-only ACL verification before any NSSM operation. */
+    verifyNodeSecurity?: (options:InstallOptions)=>void | Promise<void>;
     fileExists:(file:string)=>boolean;
     run:(args:string[])=>Promise<CommandResult>;
 };
@@ -64,6 +66,12 @@ export async function installNewService(options:InstallOptions):Promise<void> {
     }
     if(!/^[a-zA-Z0-9_-]{1,64}$/.test(options.serviceName)) {
         throw new Error('Invalid service name');
+    }
+    if(options.nodeAgent){
+        if(!options.verifyNodeSecurity){
+            throw new Error('Node service ACL security verification is required');
+        }
+        await options.verifyNodeSecurity(options);
     }
     const status=await options.run(['status',options.serviceName]);
     if(status.code===0) {
