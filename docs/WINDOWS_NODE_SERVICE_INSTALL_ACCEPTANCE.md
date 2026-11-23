@@ -39,6 +39,23 @@ The opt-in Node service installation now **requires a read-only Windows ACL secu
 
 **Residual limitations:** Runtime sidecars may be absent at verification time, can be created later, and therefore require repeated checks/monitoring in production. The current preflight is not a full recursive npm module content-integrity audit, a publisher-signature validation, a demonstrated least-privilege Windows service identity, or a complete ACL acceptance of logs and backups. SHA-256 parity between a CI copy and source proves equal bytes, not trusted origin. Production remains **NO-GO**.
 
+## Explicit low-privilege service identity — 2026-11-23
+
+`agentctl install --node-runtime` now requires an explicitly declared `NT AUTHORITY\\LocalService` identity and configures it with NSSM `ObjectName` **before** allowing the new service to start. NSSM's implicit `LocalSystem` default, missing/unknown accounts, and a failed `ObjectName` operation are rejected, with rollback of only the new registration. The original EXE-mode interface remains separate.
+
+The read-only Windows ACL security checks recognize the well-known `LocalService` SID `S-1-5-19` and require separately reviewed capabilities:
+
+| Artifact | LocalService permission | Security requirement |
+| --- | --- | --- |
+| Protected `agent.env` and its config directory | Read only | No write, ownership change or permission-edit rights |
+| `ProgramData\\TenantAgent\\runtime` and its data directory | Read/write/modify without ownership/ACL-change | Deny broader grants and all unrelated users |
+| Node executable, NSSM and application entry | Read/execute | No ability to modify code or replace executables |
+| Generated SQLite `outbox.db` and existing `-wal`/`-shm` | Explicit restricted runtime permissions | Recheck after restart and sidecar creation |
+
+**Verified actual Windows identity**: The CI copies exact SHA-256-matching Node 22 and NSSM binaries to restricted disposable Program Files paths, grants `LocalService` only its needed accesses, configures NSSM with an empty-password built-in account, then checks `sc.exe qc` reports `SERVICE_START_NAME: NT AUTHORITY\\LocalService`. The genuine tenant-agent then successfully queues offline events, restarts through real SCM, delivers on Central recovery and avoids duplicate replay. Missing or privileged account tests fail **before** SCM calls; an NSSM `ObjectName` failure rolls back the newly created service. **All five CI jobs PASS** at runtime checkpoint `f9cb68e583e57af02bf429105b038fdef0c9725f`: https://github.com/myothein/agentctl/actions/runs/45102622145 .
+
+**Remaining isolation caveat:** `LocalService` is a Windows-wide built-in account; different services running under it can share its permitted data access. It is not a dedicated per-tenant virtual service identity. Before multi-university production acceptance, test per-service SID or reviewed dedicated service identities and separate per-tenant file/database permissions, real HTTP/OIDC/Keycloak behavior, authenticated binary origin and runtime backup/restore. This CI uses synthetic test endpoints and disposable data only.
+
 ## Disposable GitHub-hosted Windows QA evidence
 
 - Node-install orchestrator unit tests: checked prerequisite rejection, Node 22/path verification, existing-service denial, argument hygiene and forced AppParameters rollback. Verified at https://github.com/myothein/agentctl/actions/runs/45097002722 .
@@ -52,7 +69,7 @@ The opt-in Node service installation now **requires a read-only Windows ACL secu
 ## Still required before production approval
 
 - Confirm signed and reproducible distribution of Node 22, JS sources, npm production dependencies, native SQLite modules and NSSM; pin hashes/signatures and review their provenance and version compatibility.
-- Complete a **production-equivalent** least-privilege Windows service identity/NTFS ACL acceptance, including recursive application package integrity, continuous WAL/SHM permission drift checks, logs and off-host backups. The new post-start checks now validate existing SQLite artifacts in isolated Windows QA, but do not certify files created later or all system accounts/ACL inheritance. Never keep real credentials in GitHub, commit history, CLI arguments or publicly accessible files.
+- Complete a **production-equivalent per-tenant service identity** and NTFS ACL acceptance. LocalService is now tested instead of LocalSystem, but dedicated tenant isolation, recursive application package integrity, continuous WAL/SHM permission drift, logs and off-host backups remain open. The post-start checks validate existing SQLite artifacts in isolated Windows QA, not future files or all account inheritance. Never keep real credentials in GitHub, commit history, CLI arguments or publicly accessible files.
 - Staging-based Keycloak/OIDC, Central and Tenant Service integration; service health and eventual retry; safe Windows recovery; independently restored off-host backups; operational observability, multi-university isolation and rollback.
 - Verify cross-repository GitHub Actions **private repository** read permissions before changing visibility: the current source checkouts rely on public repository availability.
 - Explicit operator-reviewed production installation plan and approval. Do **not** run this installer on the DOA/University production server under the sandbox QA authorization.
