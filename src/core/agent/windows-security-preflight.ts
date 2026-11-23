@@ -90,7 +90,13 @@ function inspectWindowsAcl(target:string):AclSnapshot {
         maxBuffer:256*1024
     });
     if(result.error || result.status!==0){
-        throw Error('Unable to verify Windows ACLs; no service change permitted');
+        // Read-only ACL checks never fetch file contents or secret values.
+        // Short sanitized PowerShell failure category helps distinguish an
+        // unavailable ACL provider from an unreadable security principal.
+        const details=(result.stderr||'').match(
+            /(?:IdentityNotMappedException|UnauthorizedAccessException|ItemNotFoundException|ArgumentException|Get-Item|Get-Acl|Translate|FullyQualifiedErrorId[^\r\n]{0,90})/g
+        )?.slice(0,2).join(';') ?? 'unknown';
+        throw Error('Unable to verify Windows ACLs ('+details+'); no service change permitted');
     }
     try {
         return JSON.parse(result.stdout) as AclSnapshot;
