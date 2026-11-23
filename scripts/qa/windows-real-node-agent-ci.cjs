@@ -10,7 +10,7 @@ const child=require('node:child_process');
 const crypto=require('node:crypto');
 const http=require('node:http');
 const {installNewService}=require('../../dist/core/agent/safe-install.js');
-const {verifyNodeServiceSecurity,verifyNodeSqliteArtifacts,resolveWindowsServiceSid}=require('../../dist/core/agent/windows-security-preflight.js');
+const {verifyNodeServiceSecurity,verifyNodeBackupProvisioning,verifyNodeSqliteArtifacts,resolveWindowsServiceSid}=require('../../dist/core/agent/windows-security-preflight.js');
 
 assert(process.platform==='win32' && process.env.CI==='true' &&
   process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_OS==='Windows' &&
@@ -37,6 +37,7 @@ const distPath=path.join(appRoot,'dist');
 const entry=path.join(distPath,'index.js');
 const dataRoot=path.join(programData,'TenantAgent');
 const workDir=path.join(dataRoot,'runtime');
+const backupDir=path.join(dataRoot,'verified-backups');
 const configDir=path.join(dataRoot,'config');
 const configFile=path.join(configDir,'agentci_'+id+'.env');
 const source=path.resolve('integration','tenant-agent');
@@ -279,6 +280,7 @@ async function main(){
   });
   fs.mkdirSync(workDir,{recursive:true});stagedData=true;
   fs.mkdirSync(configDir,{recursive:true});
+  fs.mkdirSync(backupDir,{recursive:true});
   tenantServer=http.createServer(async(req,res)=>{
     try{
       if(req.headers.authorization!=='Bearer '+tenantKey){
@@ -323,6 +325,8 @@ async function main(){
   const centralUrl=await bind(centralServer);
   fs.writeFileSync(configFile,[
     'TENANT_ID=tenant_ci_qa',
+    'NODE_ENV=production',
+    'TENANT_AGENT_BACKUP_DIR='+backupDir,
     'TENANT_API_URL='+tenantUrl,
     'SYSTEM_API_URL='+centralUrl,
     'TENANT_AGENT_API_KEY=ci-only-agent-local-token-longer-than-32-bytes',
@@ -333,7 +337,7 @@ async function main(){
 
   // Windows POSIX mode 0600 is NOT an NTFS ACL. Explicitly remove inherited
   // group grants and allow only SYSTEM + local Administrators on CI private data.
-  for(const p of [dataRoot,workDir,configDir,configFile,
+  for(const p of [dataRoot,workDir,backupDir,configDir,configFile,
     appRoot,distPath,entry,siblingScript,binDir,trustedNode,trustedNssm]){
     cmd('icacls.exe',[p,'/inheritance:r']);
     cmd('icacls.exe',[p,'/grant:r',
@@ -348,19 +352,25 @@ async function main(){
   const localService='*S-1-5-19';
   // Service-specific SID is the only nonprivileged private data principal.
   for(const p of [configDir,configFile])grantServiceSidAcl(p,'Read');
-  for(const p of [dataRoot,workDir])grantServiceSidAcl(p,'Modify');
+  for(const p of [dataRoot,workDir,backupDir])grantServiceSidAcl(p,'Modify');
   for(const p of [appRoot,distPath,binDir]){
     cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)RX']);
   }
   for(const p of [entry,siblingScript,trustedNode,trustedNssm]){
     cmd('icacls.exe',[p,'/grant',localService+':RX']);
   }
-  const verifiedSecurity=o=>verifyNodeServiceSecurity({
-    nodeExe:o.agentExe,entryFile:o.nodeAgent.entryFile,
-    workingDir:o.nodeAgent.workingDir,configFile:o.configFile,
-    nssmExe:o.nssmExe,serviceAccount:o.nodeAgent.serviceAccount,
-    serviceSid:o.nodeAgent.serviceSid
-  });
+  const verifiedSecurity=o=>{
+    verifyNodeServiceSecurity({
+      nodeExe:o.agentExe,entryFile:o.nodeAgent.entryFile,
+      workingDir:o.nodeAgent.workingDir,configFile:o.configFile,
+      nssmExe:o.nssmExe,serviceAccount:o.nodeAgent.serviceAccount,
+      serviceSid:o.nodeAgent.serviceSid
+    });
+    verifyNodeBackupProvisioning({
+      configFile:o.configFile,entryFile:o.nodeAgent.entryFile,
+      workingDir:o.nodeAgent.workingDir,serviceSid:o.nodeAgent.serviceSid
+    });
+  };
   const installer={
     serviceName,agentExe:trustedNode,ctlExe:trustedNode,
     nssmExe:serviceNssm,binDir:appRoot,configFile,
