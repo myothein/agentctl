@@ -16,31 +16,32 @@ const writeAccess=0x00000002 | 0x00000004 | 0x00000010 |
     0x00040000 | 0x00080000 | 0x10000000 | 0x40000000;
 const script=String.raw`
 $ErrorActionPreference='Stop'
-$p=$env:GTSP_ACL_TARGET
-if (-not $p) { throw 'No ACL target' }
-$cursor=[IO.Path]::GetFullPath($p)
-$reparse=$false
-while ($cursor) {
-  $node=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
-  if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-    $reparse=$true
-    break
+$targets=ConvertFrom-Json -InputObject $env:GTSP_ACL_TARGETS
+$result=@(foreach($p in $targets){
+  $cursor=[IO.Path]::GetFullPath([string]$p)
+  $reparse=$false
+  while ($cursor) {
+    $node=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+    if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      $reparse=$true
+      break
+    }
+    $up=[IO.Path]::GetDirectoryName($cursor.TrimEnd('\'))
+    if (-not $up -or $up -eq $cursor) { break }
+    $cursor=$up
   }
-  $up=[IO.Path]::GetDirectoryName($cursor.TrimEnd('\'))
-  if (-not $up -or $up -eq $cursor) { break }
-  $cursor=$up
-}
-$a=Get-Acl -LiteralPath $p -ErrorAction Stop
-$rules=@(foreach ($r in $a.Access) {
-  $sid=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-  [pscustomobject]@{
-    sid=$sid
-    type=[string]$r.AccessControlType
-    rights=[int]$r.FileSystemRights
-  }
+  $a=Get-Acl -LiteralPath $p -ErrorAction Stop
+  $rules=@(foreach ($r in $a.Access) {
+    $sid=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    [pscustomobject]@{
+      sid=$sid
+      type=[string]$r.AccessControlType
+      rights=[int]$r.FileSystemRights
+    }
+  })
+  [pscustomobject]@{reparse=$reparse;entries=$rules}
 })
-[pscustomobject]@{reparse=$reparse;entries=$rules} |
-  ConvertTo-Json -Depth 4 -Compress
+ConvertTo-Json -InputObject $result -Depth 5 -Compress
 `;
 
 export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
@@ -76,7 +77,7 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
     }
 }
 
-function inspectWindowsAcl(target:string):AclSnapshot {
+function inspectWindowsAclBatch(targets:string[]):AclSnapshot[] {
     if(process.platform!=='win32'){
         throw Error('Windows ACL preflight is only available on Windows');
     }
@@ -84,27 +85,25 @@ function inspectWindowsAcl(target:string):AclSnapshot {
     const result=spawnSync('powershell.exe',[
         '-NoProfile','-NonInteractive','-EncodedCommand',encoded
     ],{
-        windowsHide:true,encoding:'utf8',timeout:10000,
-        env:{...process.env,GTSP_ACL_TARGET:target},
+        windowsHide:true,encoding:'utf8',timeout:45000,
+        env:{...process.env,GTSP_ACL_TARGETS:JSON.stringify(targets)},
         stdio:['ignore','pipe','pipe'],
-        maxBuffer:256*1024
+        maxBuffer:512*1024
     });
     if(result.error || result.status!==0){
-        // Read-only ACL checks never fetch file contents or secret values.
-        // Short sanitized PowerShell failure category helps distinguish an
-        // unavailable ACL provider from an unreadable security principal.
-        const diagnostic=(result.stderr||'')
-            .split(target).join('<ACL target>')
-            .replace(/[^\x20-\x7E\r\n]/g,'')
-            .split(/\r?\n/).filter(Boolean).slice(0,2).join('; ')
-            .slice(0,240);
-        const details=diagnostic || (result.error?.name ?? 'unknown');
-        throw Error('Unable to verify Windows ACLs ('+details+'); no service change permitted');
+        // PowerShell may emit CLIXML progress records on stderr: do not treat
+        // those as data or log their raw contents.
+        const cause=result.error?.name ?? (result.status===null?'timeout':'provider');
+        throw Error('Unable to verify Windows ACLs ('+cause+'); no service change permitted');
     }
     try {
-        return JSON.parse(result.stdout) as AclSnapshot;
+        const evidence=JSON.parse(result.stdout) as unknown;
+        if(!Array.isArray(evidence) || evidence.length!==targets.length){
+            throw Error('Unexpected ACL batch shape');
+        }
+        return evidence as AclSnapshot[];
     }catch{
-        throw Error('Unable to parse Windows ACLs; no service change permitted');
+        throw Error('Unable to parse Windows ACL evidence; no service change permitted');
     }
 }
 
@@ -127,7 +126,9 @@ export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void
         options.workingDir,dataRoot]){
         unique.set(p,'private');
     }
-    for(const [p,kind] of unique){
-        assertAclSnapshot(inspectWindowsAcl(p),kind);
+    const evidence=inspectWindowsAclBatch([...unique.keys()]);
+    let index=0;
+    for(const kind of unique.values()){
+        assertAclSnapshot(evidence[index++],kind);
     }
 }
