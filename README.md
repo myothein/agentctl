@@ -4,20 +4,24 @@
 
 * Agent lifecycle commands (`start`, `stop`, `restart`, `status`)
 * Config and outbox management
-* Self-update system that safely updates the running binary
+* Self-update components under security review; untrusted automatic update metadata is disabled
 
 **Release status: PRODUCTION NO-GO.** GitHub-hosted Windows QA verifies a disposable NSSM service lifecycle, signed-update checks, and simulated rollback. This is **not** an approved production updater, a signed installer, or evidence that the real tenant-agent binary is deployable.
 
-### Integration blocker (2026-11-23)
+### Windows Node 22 service mode — isolated SCM QA passed (2026-11-23)
 
-The existing `agentctl install` expects `C:\\Program Files\\TenantAgent\\bin\\tenant-agent.exe`, `agentctl.exe`, `nssm.exe` and a protected `C:\\ProgramData\\TenantAgent\\config\\agent.env`. However, `myothein/tenant-agent` currently compiles to a Node.js `dist/index.js`, **not** a signed `tenant-agent.exe`. A hosted Windows co-repository compatibility test validates that the missing EXE prevents the installer from contacting Windows SCM.
+There are two deliberately separate installation paths:
 
-Six-repository QA evidence: https://github.com/myothein/tenant-agent/actions/runs/45095727438 . The hosted Windows runner executes the real tenant-agent Node process restart/recovery test and pinned agentctl safety tests, but it **does not** install the genuine tenant-agent as a Windows service. Existing agentctl NSSM QA installs a synthetic worker only.
+- Existing default `agentctl install`: requires a separately packaged `tenant-agent.exe`, which is **not supplied** by the current tenant-agent Node build.
+- **Opt-in** `agentctl install --node-runtime`: runs the audited Node 22 application from `C:\\Program Files\\TenantAgent\\app\\dist\\index.js` using `C:\\Program Files\\nodejs\\node.exe`. Configuration stays in the protected file `C:\\ProgramData\\TenantAgent\\config\\agent.env`; SQLite runtime data stays under `C:\\ProgramData\\TenantAgent\\runtime`. The installer verifies the Node 22 version and prerequisites before SCM registration, refuses existing services, and rolls back newly created registrations on setup failure.
 
-The historical `pkg` target uses Node 18; **do not assume** it can safely bundle or support the Node 22 agent/native SQLite configuration. Choose and security-review a packaging strategy, verify actual signed release artifacts, protected configuration/NTFS ACLs, real Windows service lifecycle and independent rollback before any GO decision. The sample release steps in this README are illustrative only: a checksum file by itself is not a trusted signature.
+**Verified disposable Windows SCM test:** the genuine compiled tenant-agent and native SQLite modules ran as a manually started NSSM service. Tests covered start/stop/restart, offline queue persistence, Central recovery delivery and duplicate replay without duplicating the accepted event. All five CI jobs PASS: https://github.com/myothein/agentctl/actions/runs/45097352354 .
+
+**Production remains NO-GO:** source/npm dependency signing and reproducibility, least-privilege service identity, Windows NTFS ACLs, secret custody, trusted update channel, off-host restore, live Central/Keycloak and installation approval are outstanding. The old Node 18 `pkg` target is not a validated packaging route for Node 22/native SQLite. No production service or data was changed by the hosted QA.
+
+See [Node Service Installation Acceptance](docs/WINDOWS_NODE_SERVICE_INSTALL_ACCEPTANCE.md).
 
 ---
-
 
 ## Table of Contents
 
@@ -114,7 +118,7 @@ Rollback if failure
 Success
 ```
 
-* Fully **atomic update**
+* **Not an accepted production updater** — only controlled signed artifact/synthetic rollback QA
 * **Backup & rollback** supported
 * Only runs on **Windows**
 
