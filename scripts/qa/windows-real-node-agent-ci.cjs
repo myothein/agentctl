@@ -221,15 +221,32 @@ async function main(){
         fs.statSync(p).isDirectory()?':(OI)(CI)F':':F')
     ]);
   }
+  // Grant the actual low-privilege service identity only the permissions it
+  // needs. No LocalService write permission is granted on executable code.
+  const localService='*S-1-5-19';
+  for(const p of [configDir,configFile]){
+    cmd('icacls.exe',[p,'/grant',
+      localService+':'+(fs.statSync(p).isDirectory()?'(OI)(CI)R':'R')]);
+  }
+  for(const p of [dataRoot,workDir]){
+    cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)M']);
+  }
+  for(const p of [appRoot,distPath,binDir]){
+    cmd('icacls.exe',[p,'/grant',localService+':(OI)(CI)RX']);
+  }
+  for(const p of [entry,trustedNode,trustedNssm]){
+    cmd('icacls.exe',[p,'/grant',localService+':RX']);
+  }
   const verifiedSecurity=o=>verifyNodeServiceSecurity({
     nodeExe:o.agentExe,entryFile:o.nodeAgent.entryFile,
     workingDir:o.nodeAgent.workingDir,configFile:o.configFile,
-    nssmExe:o.nssmExe
+    nssmExe:o.nssmExe,serviceAccount:o.nodeAgent.serviceAccount
   });
   const installer={
     serviceName,agentExe:trustedNode,ctlExe:trustedNode,
     nssmExe:serviceNssm,binDir:appRoot,configFile,
-    nodeAgent:{entryFile:entry,workingDir:workDir,runtimeVersion:process.version},
+    nodeAgent:{entryFile:entry,workingDir:workDir,runtimeVersion:process.version,
+      serviceAccount:'NT AUTHORITY\\LocalService'},
     fileExists:fs.existsSync,
     verifyNodeSecurity:verifiedSecurity,
     run:async args=>{
@@ -254,6 +271,10 @@ async function main(){
 
   serviceReserved=true;
   await installNewService(installer);
+  // Verify the *actual SCM account*, not only what our installer attempted.
+  const serviceConfig=cmd('sc.exe',['qc',serviceName]).stdout;
+  assert.match(serviceConfig,/SERVICE_START_NAME\s*:\s*NT AUTHORITY\\LocalService/i,
+    'Service identity must be LocalService; default LocalSystem is prohibited');
   assert.equal(state(),'STOPPED','Installer must use demand-start, not auto-start');
   const params=cmd(serviceNssm,['get',serviceName,'AppParameters']).stdout;
   assert(params.includes('--env-file=')&&params.includes('index.js'),
