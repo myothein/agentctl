@@ -95,7 +95,7 @@ function inspectWindowsAclBatch(targets:string[]):AclSnapshot[] {
         // those as data or log their raw contents.
         let raw=result.stderr||'';
         for(const target of targets){raw=raw.split(target).join('<ACL target>');}
-        const tail=raw.slice(-900).replace(/[^\\x20-\\x7E]/g,' ').slice(-450);
+        const tail=raw.slice(-900).replace(/[^\x20-\x7E]/g,' ').slice(-450);
         const cause=result.error?.name ?? (result.status===null?'timeout':'provider');
         throw Error('Unable to verify Windows ACLs ('+cause+'; '+tail+'); no service change permitted');
     }
