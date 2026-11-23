@@ -8,12 +8,13 @@ import { spawnSync } from 'node:child_process';
  */
 export type AclEntry = { sid:string; type:string; rights:number };
 export type AclSnapshot = { reparse:boolean; entries:AclEntry[] };
-export type AclClass = 'private' | 'code';
+export type AclClass = 'private' | 'code' | 'service-config' | 'service-runtime';
 
 const privileged=new Set(['S-1-5-18','S-1-5-32-544']); // SYSTEM, Administrators
+const localServiceSid='S-1-5-19';
 const synchronization=0x00100000;
 const writeAccess=0x00000002 | 0x00000004 | 0x00000010 |
-    0x00000020 | 0x00000040 | 0x00000100 | 0x00010000 |
+    0x00000040 | 0x00000100 | 0x00010000 |
     0x00040000 | 0x00080000 | 0x10000000 | 0x40000000;
 const script=String.raw`
 $ErrorActionPreference='Stop'
@@ -61,6 +62,7 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
         throw Error('Windows ACL preflight refused an invalid or redirected path');
     }
     let systemCanWrite=false;
+    let serviceHasRequiredAccess=false;
     for(const row of snapshot.entries) {
         if(!row || typeof row.sid!=='string' ||
             !/^S-\d+(?:-\d+)+$/.test(row.sid) ||
@@ -68,13 +70,34 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
             !Number.isInteger(row.rights)) {
             throw Error('Windows ACL preflight cannot interpret an access rule');
         }
+        if(row.sid===localServiceSid && row.type==='Deny' &&
+            (kind==='service-config'||kind==='service-runtime')) {
+            throw Error('Windows service account is explicitly denied required access');
+        }
         if(row.type!=='Allow')continue;
         const rights=row.rights >>> 0;
         if(row.sid==='S-1-5-18' && (rights & writeAccess)!==0) {
             systemCanWrite=true;
         }
         if(privileged.has(row.sid))continue;
-        if(kind==='private') {
+        if(row.sid===localServiceSid &&
+           (kind==='service-config'||kind==='service-runtime')) {
+            if(kind==='service-config'){
+                if((rights & writeAccess)!==0) {
+                    throw Error('LocalService must not write tenant agent configuration');
+                }
+                if((rights & 0x1)!==0)serviceHasRequiredAccess=true;
+            }else{
+                // Runtime must read/write its SQLite data but may not take ownership,
+                // change file ACLs or get full-control generic permissions.
+                if((rights & (0x00040000|0x00080000|0x10000000|0x40000000))!==0){
+                    throw Error('LocalService runtime permission escalation refused');
+                }
+                if((rights & 0x3)===0x3)serviceHasRequiredAccess=true;
+            }
+            continue;
+        }
+        if(kind==='private'||kind==='service-config'||kind==='service-runtime') {
             if((rights & ~synchronization)!==0) {
                 throw Error('Windows ACL preflight denied an untrusted private file or directory grant');
             }
@@ -82,8 +105,11 @@ export function assertAclSnapshot(snapshot:AclSnapshot,kind:AclClass):void {
             throw Error('Windows ACL preflight denied an untrusted application write grant');
         }
     }
-    if(kind==='private' && !systemCanWrite){
+    if(kind!=='code' && !systemCanWrite){
         throw Error('Windows ACL preflight requires SYSTEM write access');
+    }
+    if((kind==='service-config'||kind==='service-runtime') && !serviceHasRequiredAccess){
+        throw Error('Windows ACL preflight requires explicit LocalService least-privilege grant');
     }
 }
 
@@ -118,10 +144,14 @@ function inspectWindowsAclBatch(targets:string[]):AclSnapshot[] {
 export type NodeServiceSecurityPaths = {
     nodeExe:string; entryFile:string; configFile:string;
     workingDir:string; nssmExe:string;
+    serviceAccount:'NT AUTHORITY\\LocalService';
 };
 
 /** Must execute before the first NSSM status query; no path is changed here. */
 export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void {
+    if(options.serviceAccount!=='NT AUTHORITY\\LocalService'){
+        throw Error('Windows Node service must use the verified LocalService account');
+    }
     const unique=new Map<string,AclClass>();
     const appDirectory=path.win32.dirname(path.win32.dirname(options.entryFile));
     const configDir=path.win32.dirname(options.configFile);
@@ -133,7 +163,7 @@ export function verifyNodeServiceSecurity(options:NodeServiceSecurityPaths):void
         [options.workingDir,'runtime directory'],
         [dataRoot,'runtime data root'],
     ]){
-        unique.set(p,'private');
+        unique.set(p,role==='runtime directory'||role==='runtime data root'?'service-runtime':'service-config');
         roles.set(p,role);
     }
     for(const [p,role] of [
@@ -185,7 +215,7 @@ export function verifyNodeSqliteArtifacts(workingDir:string):string[] {
     const snapshots=inspectWindowsAclBatch(existing);
     for(let i=0;i<existing.length;i++){
         try {
-            assertAclSnapshot(snapshots[i],'private');
+            assertAclSnapshot(snapshots[i],'service-runtime');
         }catch{
             // Never expose the live database path or ACL contents in logs.
             throw Error('SQLite runtime ACL preflight denied a generated artifact');
