@@ -16,6 +16,10 @@ const writeAccess=0x00000002 | 0x00000004 | 0x00000010 |
     0x00040000 | 0x00080000 | 0x10000000 | 0x40000000;
 const script=String.raw`
 $ErrorActionPreference='Stop'
+# Do not rely on PowerShell module autoload: CI runners may have restricted
+# PSModulePath. Load the OS-shipped ACL provider by its trusted absolute path.
+$securityModule=Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+Import-Module -Name $securityModule -ErrorAction Stop
 $targets=ConvertFrom-Json -InputObject $env:GTSP_ACL_TARGETS
 $result=@(foreach($p in $targets){
   $cursor=[IO.Path]::GetFullPath([string]$p)
