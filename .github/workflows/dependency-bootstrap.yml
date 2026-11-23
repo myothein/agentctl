@@ -131,7 +131,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: myothein/tenant-agent
-          ref: deb7e9f45e968b18dbdcdae9dd5a5e1e852965f9
+          ref: f81e532f490c2a466920971a428f901840266cf4
           path: integration/tenant-agent
           persist-credentials: false
       - uses: actions/setup-node@v4
