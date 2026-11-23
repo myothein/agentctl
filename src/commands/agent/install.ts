@@ -41,14 +41,16 @@ export const install=new Command('install')
                 ...(options.nodeRuntime?{nodeAgent:{
                     entryFile:path.win32.join(programFiles,'app','dist','index.js'),
                     workingDir:path.win32.join(programData,'runtime'),
-                    runtimeVersion
+                    runtimeVersion,
+                    serviceAccount:'NT AUTHORITY\\LocalService' as const
                 }}:{}),
                 fileExists,
                 ...(options.nodeRuntime?{verifyNodeSecurity:({agentExe,nodeAgent,configFile,nssmExe})=>{
                     if(!nodeAgent)throw new Error('Missing Node service configuration');
                     verifyNodeServiceSecurity({
                         nodeExe:agentExe,entryFile:nodeAgent.entryFile,
-                        configFile,workingDir:nodeAgent.workingDir,nssmExe
+                        configFile,workingDir:nodeAgent.workingDir,nssmExe,
+                        serviceAccount:nodeAgent.serviceAccount
                     });
                 }}:{}),
                 run:async args=>runCommand(path.win32.join(binDir,'nssm.exe'),args,{silent:true})
