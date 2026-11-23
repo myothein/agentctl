@@ -24,6 +24,19 @@ The reviewed `agentctl install --node-runtime` operation validates Node's report
 
 If NSSM AppDirectory/AppParameters/manual-start configuration fails after registration, the newly created service must be rolled back. Failure to remove it is reported as **manual recovery required**.
 
+## NTFS ACL security preflight (2026-11-23)
+
+The opt-in Node service installation now **requires a read-only Windows ACL security check BEFORE ANY NSSM/SCM command**. The check invokes the Windows-shipped `Microsoft.PowerShell.Security` ACL provider in one bounded batch and inspects these paths: the actual Node runtime executable, the agent entry and installed application directories, the NSSM executable, the secret environment file, its parent config directory, the private runtime working directory and its parent.
+
+- For private configuration and runtime folders, untrusted Allow grants that permit access are rejected; SYSTEM must retain write permission. For executable and code paths, any untrusted write/modify/delete/permission-changing grant is rejected.
+- All target path ancestors are inspected for Windows reparse points; redirected paths are rejected. Unmapped identities are conservatively treated as **untrusted**, not silently elevated.
+- PowerShell errors, inaccessible ACLs, incomplete results and missing verification callbacks **fail closed**. The security check never changes permissions by itself and does not print secret values or ACL contents to installer logs.
+- Unit tests prove broad access to config and write access to code are denied, missing ACL review is rejected before NSSM, and correct restricted ACLs are accepted.
+
+**Hosted Windows verification:** The CI test deliberately grants `BUILTIN\\Users` read access to a synthetic `agent.env` file and confirms installation is refused with zero NSSM calls. The test then removes that grant, restricts synthetic data/app directories to SYSTEM and Administrators, stages hash-matched Node 22 and pinned NSSM binaries in protected Program Files paths, and runs the **genuine** tenant-agent under Windows SCM through offline event persistence, service restart and idempotent replay. Runtime checkpoint: https://github.com/myothein/agentctl/actions/runs/45100402324 (real Node Windows job **PASS**).
+
+**Residual limitations:** This preflight is not a full recursive content-integrity audit of every npm module, a production package-signature validation, a demonstrated least-privilege Windows service identity, or proof of ACL security for future generated SQLite WAL/log/backup files. SHA-256 matching of a CI copy proves copied bytes match the source bytes, not the source publisher's trust. Production remains **NO-GO**.
+
 ## Disposable GitHub-hosted Windows QA evidence
 
 - Node-install orchestrator unit tests: checked prerequisite rejection, Node 22/path verification, existing-service denial, argument hygiene and forced AppParameters rollback. Verified at https://github.com/myothein/agentctl/actions/runs/45097002722 .
@@ -37,7 +50,7 @@ If NSSM AppDirectory/AppParameters/manual-start configuration fails after regist
 ## Still required before production approval
 
 - Confirm signed and reproducible distribution of Node 22, JS sources, npm production dependencies, native SQLite modules and NSSM; pin hashes/signatures and review their provenance and version compatibility.
-- Verify runtime service identity and NTFS ACLs restrict `agent.env`, SQLite WAL files, logs, backups, and the application tree. Never keep real credentials in GitHub, commit history, CLI arguments or publicly accessible files.
+- Complete a **production-equivalent** least-privilege Windows service identity/NTFS ACL acceptance, including recursive application package integrity and generated SQLite WAL, logs and off-host backups. The new installer ACL checks cover key staged roots but do not certify all generated artifacts. Never keep real credentials in GitHub, commit history, CLI arguments or publicly accessible files.
 - Staging-based Keycloak/OIDC, Central and Tenant Service integration; service health and eventual retry; safe Windows recovery; independently restored off-host backups; operational observability, multi-university isolation and rollback.
 - Verify cross-repository GitHub Actions **private repository** read permissions before changing visibility: the current source checkouts rely on public repository availability.
 - Explicit operator-reviewed production installation plan and approval. Do **not** run this installer on the DOA/University production server under the sandbox QA authorization.
