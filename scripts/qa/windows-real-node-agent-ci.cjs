@@ -27,6 +27,7 @@ const programData=process.env.ProgramData||'C:\\ProgramData';
 const appRoot=path.join(programFiles,'TenantAgent','app');
 const binDir=path.join(programFiles,'TenantAgent','bin');
 const trustedNode=path.join(binDir,'node.exe');
+const trustedNssm=path.join(binDir,'nssm.exe');
 const distPath=path.join(appRoot,'dist');
 const entry=path.join(distPath,'index.js');
 const dataRoot=path.join(programData,'TenantAgent');
@@ -52,6 +53,7 @@ let tenantServer,centralServer;
 const nssm=process.env.NSSM_EXE;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 let serviceReserved=false,stagedApp=false,stagedData=false;
+let serviceNssm=nssm;
 
 function cmd(exe,args,allowFailure=false){
   const r=child.spawnSync(exe,args,{encoding:'utf8',windowsHide:true,timeout:20000,
@@ -120,12 +122,34 @@ async function main(){
   fs.mkdirSync(appRoot,{recursive:true});stagedApp=true;
   fs.mkdirSync(binDir,{recursive:true});
   fs.copyFileSync(process.execPath,trustedNode);
+  // Chocolatey shims may delegate to a package binary. Prefer the pinned
+  // actual win64 NSSM payload, then stage and hash-check it in Program Files.
+  function findBundledNssm(){
+    const root=path.join(programData,'chocolatey','lib','nssm','tools');
+    if(!fs.existsSync(root))return nssm;
+    const found=[];
+    function visit(folder,depth){
+      if(depth>4)return;
+      for(const item of fs.readdirSync(folder,{withFileTypes:true})){
+        const candidate=path.join(folder,item.name);
+        if(item.isDirectory())visit(candidate,depth+1);
+        else if(item.isFile()&&item.name.toLowerCase()==='nssm.exe')found.push(candidate);
+      }
+    }
+    visit(root,0);
+    return found.find(p=>/win64/i.test(p))||found[0]||nssm;
+  }
+  const sourceNssm=findBundledNssm();
+  fs.copyFileSync(sourceNssm,trustedNssm);
+  serviceNssm=trustedNssm;
   // The GitHub toolcache Node path is intentionally writable by CI accounts,
   // so it fails the application integrity ACL gate. Stage an identical verified
   // Node binary in the restricted Program Files test app instead.
   const digest=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   assert.equal(digest(trustedNode),digest(process.execPath),
     'Copied Node 22 runtime hash does not match the exact CI source');
+  assert.equal(digest(trustedNssm),digest(sourceNssm),
+    'Staged pinned NSSM hash does not match its pinned CI package');
   fs.cpSync(path.join(source,'dist'),distPath,{recursive:true});
   fs.copyFileSync(path.join(source,'package.json'),path.join(appRoot,'package.json'));
   fs.cpSync(path.join(source,'node_modules'),path.join(appRoot,'node_modules'),{
@@ -188,7 +212,7 @@ async function main(){
   // Windows POSIX mode 0600 is NOT an NTFS ACL. Explicitly remove inherited
   // group grants and allow only SYSTEM + local Administrators on CI private data.
   for(const p of [dataRoot,workDir,configDir,configFile,
-    appRoot,distPath,entry,binDir,trustedNode]){
+    appRoot,distPath,entry,binDir,trustedNode,trustedNssm]){
     cmd('icacls.exe',[p,'/inheritance:r']);
     cmd('icacls.exe',[p,'/grant:r',
       '*S-1-5-18:(OI)(CI)F'.replace(':(OI)(CI)F',
@@ -204,12 +228,12 @@ async function main(){
   });
   const installer={
     serviceName,agentExe:trustedNode,ctlExe:trustedNode,
-    nssmExe:nssm,binDir:appRoot,configFile,
+    nssmExe:serviceNssm,binDir:appRoot,configFile,
     nodeAgent:{entryFile:entry,workingDir:workDir,runtimeVersion:process.version},
     fileExists:fs.existsSync,
     verifyNodeSecurity:verifiedSecurity,
     run:async args=>{
-      const r=cmd(nssm,args,true);
+      const r=cmd(serviceNssm,args,true);
       return {code:r.error?1:(r.status===null?1:r.status),
         stdout:r.stdout||'',stderr:r.stderr||''};
     }
@@ -231,7 +255,7 @@ async function main(){
   serviceReserved=true;
   await installNewService(installer);
   assert.equal(state(),'STOPPED','Installer must use demand-start, not auto-start');
-  const params=cmd(nssm,['get',serviceName,'AppParameters']).stdout;
+  const params=cmd(serviceNssm,['get',serviceName,'AppParameters']).stdout;
   assert(params.includes('--env-file=')&&params.includes('index.js'),
     'NSSM did not retain reviewed Node arguments');
   assert(!params.includes('ci-only-'),'NSSM parameters contain synthetic secret');
@@ -280,7 +304,7 @@ async function cleanup(){
         await until(()=>state()==='STOPPED','CI SCM cleanup stop');
       }
       if(state()!==null){
-        cmd(nssm,['remove',serviceName,'confirm']);
+        cmd(serviceNssm,['remove',serviceName,'confirm']);
         await until(()=>state()===null,'CI SCM removal');
       }
     }catch(e){error=e;console.error('Disposable SCM cleanup failed');}
