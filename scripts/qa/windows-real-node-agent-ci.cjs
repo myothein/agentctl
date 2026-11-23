@@ -88,6 +88,15 @@ $rule=[Security.AccessControl.FileSystemAccessRule]::new(
   $flags,[Security.AccessControl.PropagationFlags]::None,
   [Security.AccessControl.AccessControlType]::Allow)
 $acl.AddAccessRule($rule)
+# OWNER RIGHTS SID removes the implicit owner WRITE_DAC privilege, even
+# for SQLite files created under the shared LocalService account. Inherit
+# this guard into future outbox.db, -wal and -shm children.
+$ownerRights=[Security.Principal.SecurityIdentifier]::new('S-1-3-4')
+$ownerRule=[Security.AccessControl.FileSystemAccessRule]::new(
+  $ownerRights,[Security.AccessControl.FileSystemRights]::ReadPermissions,
+  $flags,[Security.AccessControl.PropagationFlags]::None,
+  [Security.AccessControl.AccessControlType]::Allow)
+$acl.AddAccessRule($ownerRule)
 Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
 `;
   const result=child.spawnSync('powershell.exe',[
