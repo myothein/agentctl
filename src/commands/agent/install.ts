@@ -6,7 +6,7 @@ import { runCommand } from '../../utils/exec';
 import { fileExists } from '../../utils/fs';
 import { SERVICE_NAME } from '../../constants/service';
 import { installNewService } from '../../core/agent/safe-install';
-import { verifyNodeServiceSecurity } from '../../core/agent/windows-security-preflight';
+import { verifyNodeServiceSecurity, resolveWindowsServiceSid } from '../../core/agent/windows-security-preflight';
 
 const programFiles=path.win32.join('C:\\','Program Files','TenantAgent');
 const programData=path.win32.join('C:\\','ProgramData','TenantAgent');
@@ -22,7 +22,9 @@ export const install=new Command('install')
             // not a fabricated tenant-agent.exe. No secret is passed as a flag.
             const nodeExe=path.win32.join('C:\\','Program Files','nodejs','node.exe');
             let runtimeVersion='';
+            let serviceSid='';
             if(options.nodeRuntime){
+                serviceSid=resolveWindowsServiceSid(SERVICE_NAME);
                 const output=execFileSync(nodeExe,['--version'],{
                     encoding:'utf8',windowsHide:true,timeout:5000
                 }).trim();
@@ -42,7 +44,8 @@ export const install=new Command('install')
                     entryFile:path.win32.join(programFiles,'app','dist','index.js'),
                     workingDir:path.win32.join(programData,'runtime'),
                     runtimeVersion,
-                    serviceAccount:'NT AUTHORITY\\LocalService' as const
+                    serviceAccount:'NT AUTHORITY\\LocalService' as const,
+                    serviceSid
                 }}:{}),
                 fileExists,
                 ...(options.nodeRuntime?{verifyNodeSecurity:({agentExe,nodeAgent,configFile,nssmExe})=>{
@@ -50,8 +53,23 @@ export const install=new Command('install')
                     verifyNodeServiceSecurity({
                         nodeExe:agentExe,entryFile:nodeAgent.entryFile,
                         configFile,workingDir:nodeAgent.workingDir,nssmExe,
-                        serviceAccount:nodeAgent.serviceAccount
+                        serviceAccount:nodeAgent.serviceAccount,serviceSid:nodeAgent.serviceSid
                     });
+                }}:{}),
+                ...(options.nodeRuntime?{configureServiceSid:async(name:string)=>{
+                    // Force per-service SID into the LocalService process token;
+                    // never accept a missing SID or silently use the shared
+                    // LocalService identity for private database ACLs.
+                    execFileSync('sc.exe',['sidtype',name,'unrestricted'],{
+                        windowsHide:true,timeout:5000,stdio:['ignore','pipe','pipe']
+                    });
+                    const verified=execFileSync('sc.exe',['qsidtype',name],{
+                        encoding:'utf8',windowsHide:true,timeout:5000,
+                        stdio:['ignore','pipe','pipe']
+                    });
+                    if(!/SERVICE_SID_TYPE:\s*UNRESTRICTED/i.test(verified)){
+                        throw new Error('Windows service SID activation could not be verified');
+                    }
                 }}:{}),
                 run:async args=>runCommand(path.win32.join(binDir,'nssm.exe'),args,{silent:true})
             });
