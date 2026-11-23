@@ -167,7 +167,7 @@ function inspectSyntheticSqliteOwner(filePath){
   // suppresses that implicit right. Do not emit the file path.
   const ps=String.raw`
 $ErrorActionPreference='Stop'
-$module=Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'
+$module=Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
 Import-Module -Name $module -ErrorAction Stop
 $a=Get-Acl -LiteralPath $env:GTSP_SYNTHETIC_SQLITE -ErrorAction Stop
 $a.GetOwner([Security.Principal.SecurityIdentifier]).Value
