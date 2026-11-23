@@ -32,3 +32,12 @@ The initial CI jobs check tracked-file hygiene, dependency lockfile presence, cl
 - Configuration backup ACL/encryption, key rotation, actual Windows service installation/upgrade/rollback, UAC/least privilege, and independent signed release key approval remain open **PRODUCTION NO-GO** acceptance gates.
 
 No production service, secret store, repository visibility, or UIMS application was modified by this work.
+
+
+## 2026-11-23 — Cross-repository backup and Windows service contract (Draft)
+
+- The `agentctl install --node-runtime` preflight now inspects the protected `agent.env` before any NSSM/SCM registration. It requires `NODE_ENV=production` plus an explicit, absolute, normalized, pre-existing `TENANT_AGENT_BACKUP_DIR` on a Windows local drive. The backup path must be outside the Node application installation tree and the SQLite runtime directory; a relative/ambiguous/path-traversal/UNC or control-character path is rejected.
+- Windows ACL acceptance inspects the **existing backup directory** and path ancestors, rejects symlink/reparse redirects, broad untrusted grants, and missing service-specific SID write access. It uses the same service-runtime ACL policy and explicit OWNER RIGHTS anti-escalation protection already required for SQLite data. Error output never includes the actual backup directory or configuration contents.
+- The disposable GitHub-hosted Windows SCM regression now provisions a dedicated, synthetic backup directory with restricted service-SID ACL and a synthetic `NODE_ENV=production` configuration and exercises this preflight before the actual demand-start service registration. It does not install anything on an owner's workstation or DOA server.
+- Closed a latent, unregistered nested `agent config set` code path that previously echoed raw configuration values and wrote unvalidated assignments. It now uses the same default-deny nonsecret CLI parser as the active `config set` command, preserves protected fields, suppresses raw values/errors, and fails before privileged IO on unsafe assignments.
+- **Outstanding:** the actual release must pin identical reviewed revisions of `agentctl` and `tenant-agent` and prove the exact combination in a single Windows SCM run; existing CI may still pin older source revisions. A valid local backup directory is NOT an off-host disaster-recovery copy or proof of BitLocker, secure key custody, immutable retention or recovery objectives. Real Keycloak, agent credential rotation and tenant isolation remain unaccepted. **Production NO-GO; no merge or deployment.**
