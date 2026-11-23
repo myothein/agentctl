@@ -10,6 +10,7 @@ const child=require('node:child_process');
 const crypto=require('node:crypto');
 const http=require('node:http');
 const {installNewService}=require('../../dist/core/agent/safe-install.js');
+const {verifyNodeServiceSecurity}=require('../../dist/core/agent/windows-security-preflight.js');
 
 assert(process.platform==='win32' && process.env.CI==='true' &&
   process.env.GITHUB_ACTIONS==='true' && process.env.RUNNER_OS==='Windows' &&
@@ -174,18 +175,50 @@ async function main(){
     'TENANT_HEARTBEAT_INTERVAL_MS=1000'
   ].join('\n')+'\n',{flag:'wx',mode:0o600});
 
-  serviceReserved=true;
-  await installNewService({
+  // Windows POSIX mode 0600 is NOT an NTFS ACL. Explicitly remove inherited
+  // group grants and allow only SYSTEM + local Administrators on CI private data.
+  for(const p of [dataRoot,workDir,configDir,configFile]){
+    cmd('icacls.exe',[p,'/inheritance:r']);
+    cmd('icacls.exe',[p,'/grant:r',
+      '*S-1-5-18:(OI)(CI)F'.replace(':(OI)(CI)F',
+        fs.statSync(p).isDirectory()?':(OI)(CI)F':':F'),
+      '*S-1-5-32-544:(OI)(CI)F'.replace(':(OI)(CI)F',
+        fs.statSync(p).isDirectory()?':(OI)(CI)F':':F')
+    ]);
+  }
+  const verifiedSecurity=o=>verifyNodeServiceSecurity({
+    nodeExe:o.agentExe,entryFile:o.nodeAgent.entryFile,
+    workingDir:o.nodeAgent.workingDir,configFile:o.configFile,
+    nssmExe:o.nssmExe
+  });
+  const installer={
     serviceName,agentExe:process.execPath,ctlExe:process.execPath,
     nssmExe:nssm,binDir:appRoot,configFile,
     nodeAgent:{entryFile:entry,workingDir:workDir,runtimeVersion:process.version},
     fileExists:fs.existsSync,
+    verifyNodeSecurity:verifiedSecurity,
     run:async args=>{
       const r=cmd(nssm,args,true);
       return {code:r.error?1:(r.status===null?1:r.status),
         stdout:r.stdout||'',stderr:r.stderr||''};
     }
-  });
+  };
+  // Negative security acceptance: read access by BUILTIN\Users must block the
+  // installation before any NSSM or SCM invocation, not merely warn.
+  cmd('icacls.exe',[configFile,'/grant','*S-1-5-32-545:R']);
+  const calls=[];
+  await assert.rejects(
+    ()=>installNewService({...installer,run:async args=>{
+      calls.push(args);throw Error('SCM must not be contacted');
+    }}),
+    /untrusted private/
+  );
+  assert.equal(calls.length,0,'World-readable secret file reached NSSM');
+  cmd('icacls.exe',[configFile,'/remove','*S-1-5-32-545']);
+  verifiedSecurity(installer);
+
+  serviceReserved=true;
+  await installNewService(installer);
   assert.equal(state(),'STOPPED','Installer must use demand-start, not auto-start');
   const params=cmd(nssm,['get',serviceName,'AppParameters']).stdout;
   assert(params.includes('--env-file=')&&params.includes('index.js'),
