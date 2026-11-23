@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import path from 'path';
 import { readEnvFile } from '../../utils/env-config';
+import { safeConfigurationKey, safeConfigurationValue } from '../../utils/config-redaction';
 
 const CONFIG_FILE = path.join(
     'C:', 'ProgramData', 'TenantAgent', 'config', 'agent.env'
@@ -17,6 +18,6 @@ export const configList = new Command('list')
         }
 
         for (const [key, value] of Object.entries(config)) {
-            console.log(`${key}=${value}`);
+            console.log(`${safeConfigurationKey(key)}=${safeConfigurationValue(key, value)}`);
         }
     });
