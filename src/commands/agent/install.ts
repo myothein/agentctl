@@ -25,7 +25,7 @@ export const install=new Command('install')
                 const output=execFileSync(nodeExe,['--version'],{
                     encoding:'utf8',windowsHide:true,timeout:5000
                 }).trim();
-                if(!/^v22\\.\\d+\\.\\d+$/.test(output)){
+                if(!/^v22\.\d+\.\d+$/.test(output)){
                     throw new Error('A verified Node.js v22 runtime is required');
                 }
                 runtimeVersion=output;
