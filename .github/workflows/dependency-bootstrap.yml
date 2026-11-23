@@ -1,0 +1,168 @@
+name: Dependency bootstrap and build diagnostics
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  lockfile-bootstrap:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'hardening/release-security-baseline-20261122' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out only the proposed branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate npm lock without running dependency scripts
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Commit generated lockfile to draft branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- package-lock.json
+          if git diff --cached --quiet; then
+            echo 'No lockfile change'
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build: lock dependency graph for reproducible CI'
+          git push origin "HEAD:refs/heads/${{ github.head_ref }}"
+  build-smoke:
+    needs: lockfile-bootstrap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Clean dependency installation without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Compile
+        run: npm run build
+      - name: Fail-closed service lifecycle tests
+        run: npm test
+
+  windows-service-safety:
+    needs: lockfile-bootstrap
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Clean dependencies and compile on Windows
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Run NON-DESTRUCTIVE Windows service preflight unit tests
+        run: npm test
+
+
+  real-windows-nssm-scm:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'hardening/release-security-baseline-20261122' }}
+    needs: lockfile-bootstrap
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout only the approved draft PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile signed-update orchestration without lifecycle scripts
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Install pinned NSSM on this disposable hosted Windows runner only
+        shell: pwsh
+        run: |
+          if ("${{ runner.environment }}" -ne 'github-hosted' -or "${{ runner.os }}" -ne 'Windows') {
+            throw 'Refusing to install NSSM outside disposable GitHub-hosted Windows runner'
+          }
+          choco install nssm --version=2.24.101.20180116 --yes --no-progress --limit-output
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NSSM Chocolatey package installation failed' }
+          $nssm=(Get-Command nssm.exe -ErrorAction Stop).Source
+          if (-not (Test-Path $nssm)) { throw 'NSSM binary was not found' }
+          "NSSM_EXE=$nssm" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Real NSSM/SCM start-stop signed upgrade and failed-update rollback
+        shell: pwsh
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if (-not $env:NSSM_EXE) { throw 'Missing verified NSSM path' }
+          node scripts/qa/windows-nssm-real-ci.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Real Windows service QA failed' }
+
+  real-windows-node-agent-scm:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'hardening/release-security-baseline-20261122' }}
+    needs: lockfile-bootstrap
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout audited agentctl Draft PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - name: Checkout immutable tenant-agent runtime sources
+        uses: actions/checkout@v4
+        with:
+          repository: myothein/tenant-agent
+          ref: f81e532f490c2a466920971a428f901840266cf4
+          path: integration/tenant-agent
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile agentctl installer using locked dependencies
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Build real tenant-agent with native SQLite
+        shell: pwsh
+        run: |
+          Set-Location integration/tenant-agent
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install pinned NSSM on disposable Windows runner only
+        shell: pwsh
+        run: |
+          if ("${{ runner.environment }}" -ne 'github-hosted' -or "${{ runner.os }}" -ne 'Windows') {
+            throw 'Refusing to run genuine Windows agent QA outside disposable hosted runner'
+          }
+          choco install nssm --version=2.24.101.20180116 --yes --no-progress --limit-output
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned NSSM installation failed' }
+          $nssm=(Get-Command nssm.exe -ErrorAction Stop).Source
+          if (-not (Test-Path $nssm)) { throw 'NSSM binary missing' }
+          "NSSM_EXE=$nssm" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Real tenant-agent Node 22 service start, stop, restart and SQLite persistence
+        shell: pwsh
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          node scripts/qa/windows-real-node-agent-ci.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Real Node tenant-agent service QA failed' }

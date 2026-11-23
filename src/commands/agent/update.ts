@@ -1,94 +1,45 @@
 import { Command } from 'commander';
-import path from 'path';
-import { ensureAdmin } from '../../utils/admin';
-import { runCommand } from '../../utils/exec';
-import { fileExists } from '../../utils/fs';
-import { applyUpdate } from '../../update/apply';
-import { SERVICE_NAME } from '../../constants/service';
-import logger from '../../utils/logger';
+import fs from 'node:fs/promises';
+import { SignedAgentManifest, verifySignedAgentBinary } from '../../core/agent/signed-update';
 
-export const update = new Command('update')
-    .description('Update tenant-agent to the latest version')
-    .action(async () => {
+/**
+ * This CLI can VERIFY an artifact only. An isolated Windows SCM acceptance test
+ * and separately approved trusted public key are required before live updates.
+ */
+export const update=new Command('update')
+    .description('Inspect a signed update offline; installation remains disabled')
+    .option('--verify-only <binary>','Verify a local binary without installing or changing services')
+    .option('--manifest <file>','Local signed-update manifest JSON')
+    .option('--trusted-key <file>','Operator-approved, independently provisioned Ed25519 PEM public key')
+    .action(async(options:{
+        verifyOnly?:string;manifest?:string;trustedKey?:string
+    })=>{
         try {
-            // -------------------------------------------------
-            // 1️⃣ Require admin
-            // -------------------------------------------------
-            ensureAdmin();
-            logger.info('Admin privileges confirmed');
-            console.log('🔒 Admin privileges confirmed');
-
-            // -------------------------------------------------
-            // 2️⃣ Resolve MSI-owned NSSM path
-            // -------------------------------------------------
-            const BASE_DIR = path.join('C:', 'Program Files', 'TenantAgent');
-            const BIN_DIR = path.join(BASE_DIR, 'bin');
-            const NSSM_EXE = path.join(BIN_DIR, 'nssm.exe');
-
-            if (!fileExists(NSSM_EXE)) {
-                throw new Error(
-                    'nssm.exe not found. Tenant Agent may not be installed.'
-                );
+            if(!options.verifyOnly){
+                throw new Error('Live Windows update remains disabled pending SCM acceptance');
             }
-
-            // -------------------------------------------------
-            // 3️⃣ Verify service exists
-            // -------------------------------------------------
-            const status = await runCommand(NSSM_EXE, ['status', SERVICE_NAME]);
-            if (status.code !== 0) {
-                throw new Error(
-                    `Service "${SERVICE_NAME}" not found. Update aborted.`
-                );
+            if(!options.manifest || !options.trustedKey) {
+                throw new Error('--manifest and --trusted-key are required with --verify-only');
             }
-
-            const isStopped = status.stdout?.includes('SERVICE_STOPPED');
-
-            // -------------------------------------------------
-            // 4️⃣ Stop service if running
-            // -------------------------------------------------
-            if (!isStopped) {
-                logger.info('Stopping service before update');
-                console.log('⏹️ Stopping tenant-agent service...');
-
-                const stop = await runCommand(NSSM_EXE, ['stop', SERVICE_NAME]);
-                if (stop.code !== 0) {
-                    throw new Error(
-                        stop.stderr || stop.stdout || 'Failed to stop service'
-                    );
-                }
+            const [binaryFile,manifestFile,publicKeyFile]=await Promise.all([
+                fs.stat(options.verifyOnly),fs.stat(options.manifest),fs.stat(options.trustedKey)
+            ]);
+            if(!binaryFile.isFile() || binaryFile.size<1 || binaryFile.size>250*1024*1024 ||
+                !manifestFile.isFile() || manifestFile.size<2 || manifestFile.size>32*1024 ||
+                !publicKeyFile.isFile() || publicKeyFile.size<30 || publicKeyFile.size>16*1024) {
+                throw new Error('Invalid update verification inputs');
             }
-
-            // -------------------------------------------------
-            // 5️⃣ Apply update
-            // -------------------------------------------------
-            logger.info('Applying tenant-agent update');
-            console.log('⬇️ Applying tenant-agent update...');
-
-            await applyUpdate();
-
-            // -------------------------------------------------
-            // 6️⃣ Restart service
-            // -------------------------------------------------
-            logger.info('Starting service after update');
-            console.log('▶️ Starting tenant-agent service...');
-
-            const start = await runCommand(NSSM_EXE, ['start', SERVICE_NAME]);
-            if (start.code !== 0) {
-                throw new Error(
-                    start.stderr || start.stdout || 'Failed to start service'
-                );
-            }
-
-            // -------------------------------------------------
-            // 7️⃣ Success
-            // -------------------------------------------------
-            console.log('✅ Tenant-agent update completed successfully');
-            logger.info('Tenant-agent update completed successfully');
-
-        } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error(`❌ Update failed: ${message}`);
-            logger.error(message);
-            process.exit(1);
+            const [binary,manifestText,publicKey]=await Promise.all([
+                fs.readFile(options.verifyOnly),fs.readFile(options.manifest,'utf8'),
+                fs.readFile(options.trustedKey,'utf8')
+            ]);
+            const parsed=JSON.parse(manifestText) as SignedAgentManifest;
+            verifySignedAgentBinary(binary,parsed,publicKey);
+            console.log('Signature and checksum VALID (verification only; no service changes).');
+            console.log('Trust requires independent approval of the supplied public key.');
+        } catch(error) {
+            console.error('Update verification refused:',
+                error instanceof Error?error.message:'Unknown verification failure');
+            process.exitCode=1;
         }
     });

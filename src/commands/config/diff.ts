@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import path from 'path';
 import fs from 'fs';
 import { readEnvFile } from '../../utils/env-config';
+import { safeConfigurationKey, safeConfigurationValue } from '../../utils/config-redaction';
 
 const CONFIG_DIR = path.join('C:', 'ProgramData', 'TenantAgent', 'config');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'agent.env');
@@ -30,11 +31,11 @@ export const configDiff = new Command('diff')
 
         for (const key of new Set([...Object.keys(current), ...Object.keys(old)])) {
             if (!(key in old)) {
-                console.log(`+ ${key}=${current[key]}`);
+                console.log(`+ ${safeConfigurationKey(key)}=${safeConfigurationValue(key, current[key])}`);
             } else if (!(key in current)) {
-                console.log(`- ${key}`);
+                console.log(`- ${safeConfigurationKey(key)}`);
             } else if (current[key] !== old[key]) {
-                console.log(`~ ${key}: ${old[key]} → ${current[key]}`);
+                console.log(`~ ${safeConfigurationKey(key)}: ${safeConfigurationValue(key, old[key])} → ${safeConfigurationValue(key, current[key])}`);
             }
         }
     });

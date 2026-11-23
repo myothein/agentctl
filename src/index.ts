@@ -28,17 +28,15 @@ getCommandRegistry().forEach(cmd => program.addCommand(cmd));
 program.helpOption('-h, --help', 'Display help for agentctl');
 
 // Log CLI start
-logger.info(`agentctl started with args: ${process.argv.slice(2).join(' ')}`);
+logger.info('agentctl command started (arguments suppressed)');
 
 // Parse args safely
 program.parseAsync(process.argv).catch((err: unknown) => {
-    if (err instanceof Error) {
-        console.error('❌ CLI Error:', err.message);
-        logger.error(`CLI Error: ${err.stack || err.message}`);
-    } else {
-        console.error('❌ CLI Unknown Error:', err);
-        logger.error(`CLI Unknown Error: ${JSON.stringify(err)}`);
-    }
+    // Error messages or stacks may contain command values or secrets.
+    console.error('CLI command failed (details suppressed)');
+    logger.error('CLI execution failed: ' + (err instanceof Error ?
+        err.name.replace(/[^A-Za-z]/g, '').slice(0,40) : 'Unknown'));
+    process.exitCode = 1;
 });
 
 // Show help if no arguments

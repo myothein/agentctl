@@ -1,107 +1,88 @@
 import { Command } from 'commander';
-import path from 'path';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { ensureAdmin } from '../../utils/admin';
 import { runCommand } from '../../utils/exec';
-import { fileExists, writeFile } from '../../utils/fs';
+import { fileExists } from '../../utils/fs';
 import { SERVICE_NAME } from '../../constants/service';
-import logger from '../../utils/logger';
+import { installNewService } from '../../core/agent/safe-install';
+import { verifyNodeServiceSecurity, verifyNodeBackupProvisioning, resolveWindowsServiceSid } from '../../core/agent/windows-security-preflight';
 
-const BASE_DIR = path.join('C:', 'Program Files', 'TenantAgent');
-const BASE_DATA_DIR = path.join('C:', 'ProgramData', 'TenantAgent');
-const BIN_DIR = path.join(BASE_DIR, 'bin');
-const CONFIG_DIR = path.join(BASE_DATA_DIR, 'config');
+const programFiles=path.win32.join('C:\\','Program Files','TenantAgent');
+const programData=path.win32.join('C:\\','ProgramData','TenantAgent');
+const binDir=path.win32.join(programFiles,'bin');
 
-const AGENT_EXE = path.join(BIN_DIR, 'tenant-agent.exe');
-const AGENTCTL_EXE = path.join(BIN_DIR, 'agentctl.exe');
-const NSSM_EXE = path.join(BIN_DIR, 'nssm.exe');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'agent.env');
-
-async function execNssm(args: string[], failOnError = true) {
-    if (!fileExists(NSSM_EXE)) {
-        throw new Error(`nssm.exe not found in ${BIN_DIR}. Please reinstall tenant-agent.`);
-    }
-
-    const result = await runCommand(NSSM_EXE, args);
-    logger.info(`NSSM ${args.join(' ')} stdout: ${result.stdout}`);
-    logger.info(`NSSM ${args.join(' ')} stderr: ${result.stderr}`);
-
-    if (failOnError && result.code !== 0) {
-        throw new Error(result.stderr || result.stdout || 'Unknown NSSM error');
-    }
-}
-
-export const install = new Command('install')
-    .description('Register tenant-agent Windows service')
-    .action(async () => {
-        try {
-            logger.info('Starting tenant-agent service installation');
-
-            // -----------------------------
-            // 1️⃣ Ensure admin
-            // -----------------------------
+export const install=new Command('install')
+    .description('Register a NEW demand-start Windows agent service (never replace existing)')
+    .option('--node-runtime','Opt-in Node 22 service mode for the staged JavaScript tenant-agent')
+    .action(async(options:{nodeRuntime?:boolean})=>{
+        try{
             ensureAdmin();
-            logger.info('Admin privileges confirmed');
-
-            // -----------------------------
-            // 2️⃣ Validate required files
-            // -----------------------------
-            const REQUIRED_FILES = [AGENT_EXE, AGENTCTL_EXE, NSSM_EXE];
-            for (const file of REQUIRED_FILES) {
-                if (!fileExists(file)) {
-                    logger.error(`Required file missing: ${file}`);
-                    throw new Error(`Required file missing: ${file}`);
+            // Node service mode runs the signed/deployment-reviewed Node runtime,
+            // not a fabricated tenant-agent.exe. No secret is passed as a flag.
+            const nodeExe=path.win32.join('C:\\','Program Files','nodejs','node.exe');
+            let runtimeVersion='';
+            let serviceSid='';
+            if(options.nodeRuntime){
+                serviceSid=resolveWindowsServiceSid(SERVICE_NAME);
+                const output=execFileSync(nodeExe,['--version'],{
+                    encoding:'utf8',windowsHide:true,timeout:5000
+                }).trim();
+                if(!/^v22\.\d+\.\d+$/.test(output)){
+                    throw new Error('A verified Node.js v22 runtime is required');
                 }
+                runtimeVersion=output;
             }
-            logger.info('All required binaries are present');
-
-            // -----------------------------
-            // 3️⃣ Write default config (if missing)
-            // -----------------------------
-            if (!fileExists(CONFIG_FILE)) {
-                const DEFAULT_CONFIG = [
-                    'TENANT_ID=default',
-                    'AGENT_PORT=4000',
-                    'LOG_LEVEL=info',
-                    `LOG_PATH=${path.join(BASE_DATA_DIR, 'logs')}`,
-                    `TENANT_AGENT_BIN_PATH=${AGENT_EXE}`,
-                    'AUTO_UPDATE=true',
-                    'UPDATE_URL=https://updates.example.com/tenant-agent',
-                ].join('\n');
-
-                writeFile(CONFIG_FILE, DEFAULT_CONFIG);
-                logger.info(`Created default config file: ${CONFIG_FILE}`);
-            } else {
-                logger.info('Config file exists – skipping creation');
-            }
-
-            // -----------------------------
-            // 4️⃣ Stop & remove existing service (idempotent)
-            // -----------------------------
-            await execNssm(['stop', SERVICE_NAME], false).catch(err => logger.warn(`Stop skipped: ${err}`));
-            await execNssm(['remove', SERVICE_NAME, 'confirm'], false).catch(err => logger.warn(`Remove skipped: ${err}`));
-
-            // -----------------------------
-            // 5️⃣ Install service
-            // -----------------------------
-            await execNssm(['install', SERVICE_NAME, AGENT_EXE]);
-            await execNssm(['set', SERVICE_NAME, 'AppDirectory', BIN_DIR]);
-            await execNssm(['set', SERVICE_NAME, 'Start', 'SERVICE_AUTO_START']);
-
-            logger.info(`Service "${SERVICE_NAME}" installed successfully`);
-
-            // -----------------------------
-            // 6️⃣ Output info
-            // -----------------------------
-            console.log('✅ Tenant Agent service installed');
-            console.log(`Service   : ${SERVICE_NAME}`);
-            console.log(`Binary    : ${AGENT_EXE}`);
-            console.log(`Config    : ${CONFIG_FILE}`);
-            console.log(`Logs dir  : ${path.join(BASE_DIR, 'logs')}`);
-
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error('❌ Install failed:', message);
-            logger.error(message);
-            process.exit(1);
+            await installNewService({
+                serviceName:SERVICE_NAME,
+                agentExe:options.nodeRuntime?nodeExe:path.win32.join(binDir,'tenant-agent.exe'),
+                ctlExe:options.nodeRuntime?nodeExe:path.win32.join(binDir,'agentctl.exe'),
+                nssmExe:path.win32.join(binDir,'nssm.exe'),
+                binDir,
+                configFile:path.win32.join(programData,'config','agent.env'),
+                ...(options.nodeRuntime?{nodeAgent:{
+                    entryFile:path.win32.join(programFiles,'app','dist','index.js'),
+                    workingDir:path.win32.join(programData,'runtime'),
+                    runtimeVersion,
+                    serviceAccount:'NT AUTHORITY\\LocalService' as const,
+                    serviceSid
+                }}:{}),
+                fileExists,
+                ...(options.nodeRuntime?{verifyNodeSecurity:({agentExe,nodeAgent,configFile,nssmExe})=>{
+                    if(!nodeAgent)throw new Error('Missing Node service configuration');
+                    verifyNodeServiceSecurity({
+                        nodeExe:agentExe,entryFile:nodeAgent.entryFile,
+                        configFile,workingDir:nodeAgent.workingDir,nssmExe,
+                        serviceAccount:nodeAgent.serviceAccount,serviceSid:nodeAgent.serviceSid
+                    });
+                    // The tenant-agent must never start in development mode
+                    // or fall back to an application-tree SQLite backup path.
+                    verifyNodeBackupProvisioning({
+                        configFile,entryFile:nodeAgent.entryFile,
+                        workingDir:nodeAgent.workingDir,serviceSid:nodeAgent.serviceSid
+                    });
+                }}:{}),
+                ...(options.nodeRuntime?{configureServiceSid:async(name:string)=>{
+                    // Force per-service SID into the LocalService process token;
+                    // never accept a missing SID or silently use the shared
+                    // LocalService identity for private database ACLs.
+                    execFileSync('sc.exe',['sidtype',name,'unrestricted'],{
+                        windowsHide:true,timeout:5000,stdio:['ignore','pipe','pipe']
+                    });
+                    const verified=execFileSync('sc.exe',['qsidtype',name],{
+                        encoding:'utf8',windowsHide:true,timeout:5000,
+                        stdio:['ignore','pipe','pipe']
+                    });
+                    if(!/SERVICE_SID_TYPE:\s*UNRESTRICTED/i.test(verified)){
+                        throw new Error('Windows service SID activation could not be verified');
+                    }
+                }}:{}),
+                run:async args=>runCommand(path.win32.join(binDir,'nssm.exe'),args,{silent:true})
+            });
+            console.log('New tenant-agent Windows service registered in MANUAL START mode.');
+            console.log('Runtime secret provisioning, ACL review and SCM acceptance remain mandatory.');
+        }catch(error){
+            console.error('Install refused:',error instanceof Error?error.message:'Unknown error');
+            process.exitCode=1;
         }
     });

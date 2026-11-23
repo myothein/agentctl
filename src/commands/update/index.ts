@@ -1,31 +1,21 @@
 import { Command } from 'commander';
 import { checkVersionAndUpdate } from '../../core/self-update/index';
-import { promptConfirm } from './prompt';
-import { printSuccess, printInfo, printError } from './output';
-import { parseFlags } from './flags';
 
+/** This legacy subcommand only supports a safe metadata/version check. */
 export const agentctlUpdate = new Command('update')
-    .description('Update agentctl CLI to the latest version')
-    .option('--check', 'Check for latest version without updating')
-    .option('--yes', 'Automatically confirm update')
-    .action(async (options) => {
+    .description('Check for a new agentctl version; live replacement is disabled')
+    .option('--check','Inspect version metadata without changing files')
+    .option('--yes','Legacy option; automatic update is disabled')
+    .action(async(options:{check?:boolean;yes?:boolean})=>{
         try {
-            const flags = parseFlags(options);
-
-            const proceed = flags.yes || await promptConfirm('Proceed with update?');
-            if (!proceed) {
-                printInfo('Update cancelled by user.');
-                return;
+            if(!options.check || options.yes) {
+                throw new Error('Unsafe self-update disabled');
             }
-
-            const result = await checkVersionAndUpdate(flags);
-
-            if (result.updated) {
-                printSuccess(`agentctl updated to version ${result.version}`);
-            } else {
-                printInfo('agentctl is already up to date.');
-            }
-        } catch (err: any) {
-            printError(`Update failed: ${err.message}`);
+            const result=await checkVersionAndUpdate({check:true,yes:false});
+            console.log('Latest published version: '+result.version);
+            console.log('No service or executable changes made');
+        }catch(error){
+            console.error(error instanceof Error?error.message:'Update check failed');
+            process.exitCode=1;
         }
     });

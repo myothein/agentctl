@@ -1,0 +1,46 @@
+name: Release gate - repository hygiene
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  tracked-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked env files, runtime data and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          # NUL-delimited paths: fail closed for filenames containing whitespace.
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              .env|.env.*|*/.env|*/.env.*)
+                case "$path" in
+                  .env.example|*/.env.example|.env.template|*/.env.template) ;;
+                  *) printf '::error::Tracked local environment configuration: %q\n' "$path"; failed=1 ;;
+                esac ;;
+            esac
+            # Keep authentication material out of even temporary draft branches.
+            case "$path" in
+              .npmrc|*/.npmrc|*.pem|*.p12|*.pfx|*.key|id_rsa|*/id_rsa|id_ed25519|*/id_ed25519)
+                printf '::error::Tracked authentication material: %q\n' "$path"; failed=1 ;;
+            esac
+            # Ignore source code under src/backup; reject runtime archives and data.
+            case "$path" in
+              node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|coverage/*|*/coverage/*|logs/*|*/logs/*|mybackup/*|*/mybackup/*|backups/*|*/backups/*|data/*.db|*/data/*.db|*.db|*.db-*|*.sqlite|*.sqlite3|*.sqlite-*|*.sqlite3-*|*.dump|*.backup|*.log|outbox-events.json|*/outbox-events.json)
+                printf '::error::Tracked runtime artifact: %q\n' "$path"; failed=1 ;;
+            esac
+          done < <(git ls-files -z)
+          exit "$failed"
+  reproducible-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a committed dependency lockfile
+        shell: bash
+        run: |
+          test -f package-lock.json || test -f pnpm-lock.yaml || test -f yarn.lock
