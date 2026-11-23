@@ -94,7 +94,7 @@ function inspectWindowsAcl(target:string):AclSnapshot {
         // Short sanitized PowerShell failure category helps distinguish an
         // unavailable ACL provider from an unreadable security principal.
         const diagnostic=(result.stderr||'')
-            .replaceAll(target,'<ACL target>')
+            .split(target).join('<ACL target>')
             .replace(/[^\x20-\x7E\r\n]/g,'')
             .split(/\r?\n/).filter(Boolean).slice(0,2).join('; ')
             .slice(0,240);
