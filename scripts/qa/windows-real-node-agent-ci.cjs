@@ -7,6 +7,8 @@ const fs=require('node:fs');
 const path=require('node:path');
 const os=require('node:os');
 const child=require('node:child_process');
+const crypto=require('node:crypto');
+const http=require('node:http');
 const {installNewService}=require('../../dist/core/agent/safe-install.js');
 
 assert(process.platform==='win32' && process.env.CI==='true' &&
@@ -29,6 +31,21 @@ const workDir=path.join(dataRoot,'runtime');
 const configDir=path.join(dataRoot,'config');
 const configFile=path.join(configDir,'agentci_'+id+'.env');
 const source=path.resolve('integration','tenant-agent');
+const Database=require(path.join(source,'node_modules','better-sqlite3'));
+const tenantId='tenant_ci_qa';
+const tenantKey='ci-only-agent-local-token-longer-than-32-bytes';
+const centralKey='ci-only-central-local-token-longer-than-32-bytes';
+const eventId=crypto.randomUUID();
+const occurredAt=new Date().toISOString();
+const sourceEvent={
+  id:eventId,tenant_code:tenantId,agent_id:'tenant-service',
+  aggregate_type:'Subject',aggregate_id:'101',event_type:'subject.created',
+  payload:{id:101,name:'Synthetic SCM subject'},created_at:occurredAt,
+  occurred_at:occurredAt,retry_count:0,event_version:1
+};
+let sourceMarked=false,centralOnline=false,duplicateCount=0;
+const centralEvents=new Map();
+let tenantServer,centralServer;
 const nssm=process.env.NSSM_EXE;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 let serviceReserved=false,stagedApp=false,stagedData=false;
@@ -57,6 +74,34 @@ async function until(predicate,label,timeout=25000){
   }
   throw Error('Timed out waiting for '+label);
 }
+function reply(res,status,data){
+  res.writeHead(status,{'content-type':'application/json'});
+  res.end(JSON.stringify(data));
+}
+async function readBody(req){
+  let body='';
+  for await(const chunk of req){
+    body+=chunk.toString('utf8');
+    if(body.length>65536)throw Error('Overlong synthetic payload');
+  }
+  return JSON.parse(body||'{}');
+}
+async function bind(server){
+  await new Promise((resolve,reject)=>{
+    server.once('error',reject);
+    server.listen(0,'127.0.0.1',resolve);
+  });
+  return 'http://127.0.0.1:'+server.address().port;
+}
+function outboxRow(){
+  const p=path.join(workDir,'data','outbox.db');
+  if(!fs.existsSync(p))return null;
+  const db=new Database(p,{readonly:true});
+  try{
+    return db.prepare('SELECT id,tenantId,sent,retry_count FROM outbox WHERE id=?')
+      .get(eventId)||null;
+  }finally{db.close();}
+}
 async function main(){
   assert(nssm&&fs.existsSync(nssm),'Pinned NSSM missing from hosted runner');
   assert(fs.existsSync(path.join(source,'dist','index.js')),'Compiled agent entry missing');
@@ -77,10 +122,52 @@ async function main(){
   });
   fs.mkdirSync(workDir,{recursive:true});stagedData=true;
   fs.mkdirSync(configDir,{recursive:true});
+  tenantServer=http.createServer(async(req,res)=>{
+    try{
+      if(req.headers.authorization!=='Bearer '+tenantKey){
+        reply(res,401,{success:false});return;
+      }
+      if(req.method==='GET'&&req.url==='/local-events/pending'){
+        reply(res,200,{success:true,data:sourceMarked?[]:[sourceEvent]});return;
+      }
+      if(req.method==='PATCH'&&req.url==='/local-events/'+eventId+'/mark-sent'){
+        sourceMarked=true;reply(res,200,{success:true});return;
+      }
+      reply(res,404,{success:false});
+    }catch{reply(res,500,{success:false});}
+  });
+  centralServer=http.createServer(async(req,res)=>{
+    try{
+      if(req.headers.authorization!=='Bearer '+centralKey){
+        reply(res,401,{success:false});return;
+      }
+      if(req.method==='POST'&&req.url==='/api/v1/heartbeats'){
+        reply(res,200,{success:true,status:'recorded'});return;
+      }
+      if(req.method==='POST'&&req.url==='/api/v1/events'){
+        const event=await readBody(req);
+        if(event.id!==eventId||event.tenantId!==tenantId){
+          reply(res,400,{success:false});return;
+        }
+        if(!centralOnline){
+          reply(res,503,{success:false});return;
+        }
+        if(centralEvents.has(event.id)){
+          duplicateCount++;
+          reply(res,200,{success:true,status:'duplicate',eventId});return;
+        }
+        centralEvents.set(event.id,event);
+        reply(res,201,{success:true,status:'accepted',eventId});return;
+      }
+      reply(res,404,{success:false});
+    }catch{reply(res,500,{success:false});}
+  });
+  const tenantUrl=await bind(tenantServer);
+  const centralUrl=await bind(centralServer);
   fs.writeFileSync(configFile,[
     'TENANT_ID=tenant_ci_qa',
-    'TENANT_API_URL=http://127.0.0.1:59991',
-    'SYSTEM_API_URL=http://127.0.0.1:59992',
+    'TENANT_API_URL='+tenantUrl,
+    'SYSTEM_API_URL='+centralUrl,
     'TENANT_AGENT_API_KEY=ci-only-agent-local-token-longer-than-32-bytes',
     'CENTRAL_AGENT_API_KEY=ci-only-central-local-token-longer-than-32-bytes',
     'TENANT_SYNC_INTERVAL_MS=1000',
@@ -110,13 +197,35 @@ async function main(){
   const dbPath=path.join(workDir,'data','outbox.db');
   await until(()=>fs.existsSync(dbPath)&&fs.statSync(dbPath).size>0,
     'genuine tenant-agent SQLite initialization',20000);
+  await until(()=>sourceMarked&&outboxRow()?.sent===0&&outboxRow()?.retry_count>=1,
+    'outbox pending while Central is unavailable',20000);
+  assert.equal(centralEvents.size,0,'Offline mode must never fake central delivery');
   cmd('sc.exe',['stop',serviceName]);
   await until(()=>state()==='STOPPED','actual Node.js service STOPPED');
   assert(fs.existsSync(dbPath),'Stopped service unexpectedly deleted SQLite outbox');
+  assert.equal(outboxRow()?.sent,0,'Unacknowledged event must survive SCM stop');
+
+  centralOnline=true;
   cmd('sc.exe',['start',serviceName]);
   await until(()=>state()==='RUNNING','actual Node.js service restart');
-  await until(()=>fs.existsSync(dbPath),'durable outbox persists after service restart');
-  console.log('PASS genuine Node 22 tenant-agent: NSSM register, SCM start/stop/restart, persistent SQLite');
+  await until(()=>centralEvents.size===1&&outboxRow()?.sent===1,
+    'offline event delivery after SCM restart',20000);
+  assert.equal(centralEvents.get(eventId)?.payload?.id,101);
+
+  // Simulate an interruption after Central has persisted the event but before
+  // the local SQLite acknowledgement could be committed.
+  cmd('sc.exe',['stop',serviceName]);
+  await until(()=>state()==='STOPPED','SCM stop before duplicate retry');
+  const db=new Database(dbPath);
+  try{
+    db.prepare("UPDATE outbox SET sent=0,status='pending' WHERE id=?").run(eventId);
+  }finally{db.close();}
+  cmd('sc.exe',['start',serviceName]);
+  await until(()=>state()==='RUNNING','SCM restart before replay');
+  await until(()=>duplicateCount>=1&&outboxRow()?.sent===1,
+    'idempotent central replay after SCM restart');
+  assert.equal(centralEvents.size,1,'Duplicate retry must not duplicate central events');
+  console.log('PASS genuine Node 22 tenant-agent: NSSM/SCM lifecycle, offline durable SQLite, restart delivery and idempotent replay');
 }
 async function cleanup(){
   let error;
@@ -131,6 +240,13 @@ async function cleanup(){
         await until(()=>state()===null,'CI SCM removal');
       }
     }catch(e){error=e;console.error('Disposable SCM cleanup failed');}
+  }
+  for(const server of [tenantServer,centralServer]){
+    if(server?.listening){
+      try{await new Promise((resolve,reject)=>
+        server.close(e=>e?reject(e):resolve()));}
+      catch(e){error=error||e;}
+    }
   }
   if(state()!==null){throw error||Error('Service remained registered; retaining QA paths');}
   if(stagedApp)fs.rmSync(appRoot,{recursive:true,force:true});
