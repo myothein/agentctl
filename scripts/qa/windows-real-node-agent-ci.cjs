@@ -161,6 +161,34 @@ function outboxRow(){
       .get(eventId)||null;
   }finally{db.close();}
 }
+function inspectSyntheticSqliteOwner(filePath){
+  // An observed owner SID is essential to interpreting the sibling-service
+  // test: Windows allows an owner to change a DACL unless OWNER RIGHTS
+  // suppresses that implicit right. Do not emit the file path.
+  const ps=String.raw`
+$ErrorActionPreference='Stop'
+$module=Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'
+Import-Module -Name $module -ErrorAction Stop
+$a=Get-Acl -LiteralPath $env:GTSP_SYNTHETIC_SQLITE -ErrorAction Stop
+$a.GetOwner([Security.Principal.SecurityIdentifier]).Value
+`;
+  const r=child.spawnSync('powershell.exe',[
+    '-NoProfile','-NonInteractive','-EncodedCommand',
+    Buffer.from(ps,'utf16le').toString('base64')
+  ],{
+    windowsHide:true,encoding:'utf8',timeout:15000,
+    env:{...process.env,GTSP_SYNTHETIC_SQLITE:filePath},
+    stdio:['ignore','pipe','pipe']
+  });
+  if(r.error||r.status!==0)throw Error('Cannot establish synthetic SQLite owner SID');
+  const owner=(r.stdout||'').trim();
+  if(owner!=='S-1-5-19'&&owner!==serviceSid){
+    throw Error('Synthetic SQLite owner unexpectedly differs from service identities');
+  }
+  console.log('QA SQLite owner class: '+(owner==='S-1-5-19'?
+    'shared LocalService (OWNER RIGHTS required)':'service SID'));
+  return owner;
+}
 async function verifySiblingIsolation(dbPath){
   assert.equal(stateOf(siblingName),null,'Would replace a sibling service');
   assert(!fs.existsSync(siblingRoot),'Sibling evidence folder unexpectedly exists');
@@ -390,6 +418,7 @@ async function main(){
   await until(()=>state()==='STOPPED','actual Node.js service STOPPED');
   assert(fs.existsSync(dbPath),'Stopped service unexpectedly deleted SQLite outbox');
   assert.equal(outboxRow()?.sent,0,'Unacknowledged event must survive SCM stop');
+  inspectSyntheticSqliteOwner(dbPath);
   // Execute a second Windows service under the SAME LocalService account but
   // with a DIFFERENT service SID. It must not read our SQLite file or gain
   // WRITE_DAC as its shared file owner. Only synthetic CI data is targeted.
