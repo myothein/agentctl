@@ -88,7 +88,8 @@ const nodeServiceFixture={
     nodeAgent:{
         entryFile:'C:\\Program Files\\TenantAgent\\app\\dist\\index.js',
         workingDir:'C:\\ProgramData\\TenantAgent\\runtime',
-        runtimeVersion:'v22.15.0'
+        runtimeVersion:'v22.15.0',
+        serviceAccount:'NT AUTHORITY\\LocalService' as const
     }
 };
 
@@ -103,6 +104,7 @@ test('opt-in Node 22 mode registers exact executable, config path and entry with
         ['set','tenant-agent','AppParameters',
             '"--env-file='+nodeServiceFixture.configFile+'" "'+
                 nodeServiceFixture.nodeAgent.entryFile+'"'],
+        ['set','tenant-agent','ObjectName','NT AUTHORITY\\LocalService',''],
         ['set','tenant-agent','Start','SERVICE_DEMAND_START']
     ]);
     assert.doesNotMatch(JSON.stringify(x.history),/password=|token=|key=/i);
@@ -195,4 +197,63 @@ test('ACL preflight fails closed on reparse points, malformed ACLs and absent SY
     assert.throws(()=>assertAclSnapshot({reparse:false,entries:[{
         sid:'S-1-5-32-544',type:'Allow',rights:2032127
     }]},'private'),/SYSTEM write/);
+});
+
+
+test('Node mode refuses missing or privileged Windows service accounts before NSSM',async()=>{
+    const x=scenario({code:3,stderr:"Can't open service"});
+    const wrong=([
+        undefined,
+        'LocalSystem',
+        'NT AUTHORITY\\SYSTEM',
+        'NT AUTHORITY\\NetworkService'
+    ] as unknown[]);
+    for(const account of wrong){
+        const agent={...nodeServiceFixture.nodeAgent,serviceAccount:account as 'NT AUTHORITY\\LocalService'};
+        await assert.rejects(
+            ()=>installNewService({...x.options,...nodeServiceFixture,nodeAgent:agent}),
+            /low-privilege LocalService identity/
+        );
+    }
+    assert.deepEqual(x.history,[]);
+});
+
+test('Node service identity setup failure rolls back the new service',async()=>{
+    const x=scenario({code:3,stderr:"Can't open service"},{failCommand:'set ObjectName'});
+    await assert.rejects(
+        ()=>installNewService({...x.options,...nodeServiceFixture}),
+        /ObjectName/
+    );
+    assert.deepEqual(x.history.at(-1),['remove','tenant-agent','confirm']);
+});
+
+test('LocalService config read without write and runtime limited Modify must be explicit',()=>{
+    const sid='S-1-5-19';
+    const readonly={
+        ...trustedAcl,
+        entries:[...trustedAcl.entries,{sid,type:'Allow',rights:131209}]
+    };
+    const runtime={
+        ...trustedAcl,
+        entries:[...trustedAcl.entries,{sid,type:'Allow',rights:1245631}]
+    };
+    assert.doesNotThrow(()=>assertAclSnapshot(readonly,'service-config'));
+    assert.doesNotThrow(()=>assertAclSnapshot(runtime,'service-runtime'));
+    assert.throws(()=>assertAclSnapshot(trustedAcl,'service-config'),/explicit LocalService/);
+    assert.throws(()=>assertAclSnapshot(readonly,'service-runtime'),/explicit LocalService/);
+    assert.throws(()=>assertAclSnapshot(runtime,'service-config'),/must not write/);
+    const full={
+        ...trustedAcl,
+        entries:[...trustedAcl.entries,{sid,type:'Allow',rights:2032127}]
+    };
+    assert.throws(()=>assertAclSnapshot(full,'service-runtime'),/permission escalation/);
+    const denied={
+        ...runtime,entries:[...runtime.entries,{sid,type:'Deny',rights:1}]
+    };
+    assert.throws(()=>assertAclSnapshot(denied,'service-runtime'),/explicitly denied/);
+    const foreign={
+        ...runtime,entries:[...runtime.entries,
+            {sid:'S-1-5-32-545',type:'Allow',rights:131209}]
+    };
+    assert.throws(()=>assertAclSnapshot(foreign,'service-runtime'),/untrusted private/);
 });
